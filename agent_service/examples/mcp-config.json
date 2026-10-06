@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "creality-print": {
+      "command": "/Users/sean/Library/Application Support/CrealityAgent/.venv/bin/creality-agent-mcp",
+      "env": {
+        "CREALITY_AGENT_HOME": "/Users/sean/Library/Application Support/CrealityAgent/runtime",
+        "CREALITY_AGENT_API_URL": "http://127.0.0.1:18088"
+      }
+    }
+  }
+}
