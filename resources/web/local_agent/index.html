@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Creality Print · Local Agent</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">C</span><div><strong>Local Agent</strong><small>Creality Print workspace</small></div></div>
+    <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-label">Connecting to local service…</span><button id="refresh" class="icon-button" type="button" aria-label="Refresh service state">↻</button></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="eyebrow">WORKSPACE</div>
+      <nav aria-label="Workspace">
+        <button class="nav active" data-view="overview">◫ <span>Overview</span></button>
+        <button class="nav" data-view="jobs">▤ <span>Print jobs</span></button>
+        <button class="nav" data-view="printers">▣ <span>Printers & CFS</span></button>
+        <button class="nav" data-view="profiles">◈ <span>Profiles</span></button>
+        <button class="nav" data-view="settings">⚙ <span>Model & limits</span></button>
+        <button class="nav" data-view="chat">✳ <span>Conversations</span></button>
+      </nav>
+      <div class="sidebar-note"><span class="local-icon">⌂</span><span>Images and printer controls stay on this Mac.</span></div>
+    </aside>
+    <main>
+      <section id="view-overview" class="view">
+        <div class="page-heading"><div><div class="eyebrow">LOCAL WORKSPACE</div><h1>Overview</h1><p>Review printer readiness, active work and decisions awaiting you.</p></div><button class="primary" data-go="jobs">＋ New job</button></div>
+        <div id="summary-cards" class="summary-grid"></div>
+        <div class="columns"><article class="panel"><div class="panel-heading"><div><h2>Attention needed</h2><p>Alerts and owner decisions</p></div><button class="text-button" data-go="jobs">View jobs</button></div><div id="alerts-list" class="stack empty-state">No current alerts.</div></article>
+          <article class="panel"><div class="panel-heading"><div><h2>Recent jobs</h2><p>Latest activity from the local service</p></div><button class="text-button" data-go="jobs">All jobs</button></div><div id="recent-jobs" class="stack empty-state">No jobs yet.</div></article></div>
+        <article class="panel question-panel"><div class="panel-heading"><div><h2>Owner questions</h2><p>Questions from the local assistant, including questions asked before a job exists.</p></div></div><div id="questions-list" class="stack empty-state">No open questions.</div><div id="question-history" class="stack"></div></article>
+      </section>
+
+      <section id="view-jobs" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">PRINT QUEUE</div><h1>Print jobs</h1><p>Prepare and control jobs through the local service.</p></div></div>
+        <article class="panel"><div class="panel-heading"><div><h2>Create a job</h2><p>Choose one model source and a printer request.</p></div></div>
+          <form id="job-form" class="form-grid"><label class="wide">Request description<input name="request" required maxlength="4000" placeholder="What should be printed?"></label><label>Model URL<input name="source_url" type="url" placeholder="https://…"></label><label>Local model path<input name="local_path" placeholder="/path/to/model.stl"></label><label>Printer<select name="printer_id" id="job-printer"></select></label><label>Material<input name="material" placeholder="PLA"></label><label>Color<input name="color" placeholder="Optional"></label><label>Copies<input name="copies" type="number" min="1" max="100" value="1"></label><div class="wide form-actions"><button class="primary" type="submit">Create job</button><span class="hint">Use a URL or a file inside an allowed import folder.</span></div></form>
+        </article>
+        <div id="jobs-list" class="job-list"></div>
+      </section>
+
+      <section id="view-printers" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">FLEET</div><h1>Printers & CFS</h1><p>Enrollment records do not qualify a printer for automatic starts.</p></div></div>
+        <div id="printers-list" class="summary-grid"></div>
+        <div class="columns">
+          <article class="panel"><div class="panel-heading"><div><h2>Enroll or update printer</h2><p>Connection details are sent only to the local service.</p></div></div>
+            <form id="printer-form" class="form-grid"><label>Printer<select name="printer_id" id="printer-id"></select></label><label>Model<select name="model"><option>K1 Max</option><option>K1 SE</option><option>Creality Hi</option></select></label><label>Display name<input name="name" placeholder="Printer name"></label><label>LAN endpoint<input name="endpoint" placeholder="http://printer.local"></label><label>API key environment name<input name="api_key_env" placeholder="Optional variable name"></label><label>Nozzle (mm)<input name="nozzle_mm" type="number" step="0.1" min="0.1" placeholder="0.4"></label><label>Loaded material<input name="material" placeholder="PLA"></label><label>Loaded color<input name="color" placeholder="Black"></label><label>Remaining filament (g)<input name="remaining_grams" type="number" min="0" step="1"></label><label>Camera URL<input name="camera_url" placeholder="http://camera.local/stream"></label><label>Frame sequence header<input name="frame_sequence_header" placeholder="Configured camera header"></label><label>Frame timestamp header<input name="frame_time_header" placeholder="Configured camera header"></label><label>Bed detector URL<input name="bed_detector_url" placeholder="http://127.0.0.1:9000/clearance"></label><label>Failure detector URL<input name="failure_detector_url" placeholder="http://127.0.0.1:9000/failure"></label><label>Printer type<select name="cfs"><option value="">Unspecified</option><option value="true">CFS attached</option><option value="false">No CFS</option></select></label><label>Camera association<input name="camera_association_confirmed" type="checkbox"> I confirmed this camera shows this printer</label><label>Printer identity<input name="identity_confirmed" type="checkbox"> I confirmed the printer identity</label><label>Loaded filament<input name="filament_verified" type="checkbox"> I verified the loaded material and color</label><div class="wide form-actions"><button class="primary" type="submit">Save printer details</button></div></form>
+          </article>
+          <article class="panel"><div class="panel-heading"><div><h2>Bed reference</h2><p>Confirm an empty bed and select the inspection region.</p></div></div>
+            <form id="reference-form" class="form-grid"><label>Printer<select name="printer_id" class="printer-select"></select></label><label>Bed clearance<input name="bed_clear_confirmed" type="checkbox"> I confirmed the bed is empty</label><label>Left<input name="left" type="number" min="0" value="0"></label><label>Top<input name="top" type="number" min="0" value="0"></label><label>Right<input name="right" type="number" min="1" value="1"></label><label>Bottom<input name="bottom" type="number" min="1" value="1"></label><div class="wide form-actions"><button class="secondary" type="submit">Save reference region</button></div></form>
+          </article>
+        </div>
+        <article class="panel"><div class="panel-heading"><div><h2>CFS inventory</h2><p>Record loaded filament slots and verify each slot before relying on it.</p></div></div>
+          <form id="cfs-form" class="form-grid"><label>Printer<select name="printer_id" id="cfs-printer" class="printer-select"></select></label><div class="wide"><div id="cfs-slots" class="cfs-slots"></div></div><div class="wide form-actions"><button class="secondary" type="button" id="cfs-add-slot">Add slot</button><button class="primary" type="submit">Save CFS inventory</button><button class="text-button" type="button" id="cfs-discard">Reload saved slots</button><button class="text-button" type="button" id="probe-printer">Probe selected printer</button><span id="cfs-dirty-label" class="unsaved-label" aria-live="polite"></span></div></form>
+        </article>
+      </section>
+
+      <section id="view-profiles" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">PREPARATION</div><h1>Profiles</h1><p>Connect a verified local printer profile to its settings and filament presets.</p></div></div>
+        <div id="profiles-list" class="summary-grid"></div>
+        <article class="panel"><div class="panel-heading"><div><h2>Save profile</h2><p>Preset paths must be service-managed local paths.</p></div></div>
+          <form id="profile-form" class="form-grid"><label>Profile ID<input name="id" required></label><label>Printer<select name="printer_id" class="printer-select"></select></label><label>Material<input name="material" required></label><label>Color<input name="color"></label><label>Nozzle (mm)<input name="nozzle_mm" type="number" step="0.1" value="0.4"></label><label>Verified<select name="verified"><option value="false">No</option><option value="true">Yes</option></select></label><label class="wide">Settings preset paths<textarea name="settings" rows="2" placeholder="One service-managed path per line"></textarea></label><label class="wide">Filament preset paths<textarea name="filaments" rows="2" placeholder="One service-managed path per line"></textarea></label><div class="wide form-actions"><button class="primary" type="submit">Save profile</button></div></form>
+        </article>
+      </section>
+
+      <section id="view-settings" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">SERVICE SETTINGS</div><h1>Model & limits</h1><p>Configure a local model endpoint and resource limits that require your confirmation.</p></div></div>
+        <div class="columns"><article class="panel"><div class="panel-heading"><div><h2>Local model</h2><p id="model-key-state">API key status is not available.</p></div></div><form id="model-form" class="form-grid"><label class="wide">Base URL<input name="base_url" required placeholder="http://127.0.0.1:1234"></label><label class="wide">Model<input name="model" required></label><label class="wide">API key<input name="api_key" type="password" autocomplete="new-password" placeholder="Optional local service key"></label><div class="wide form-actions"><button class="primary" type="submit">Save model settings</button></div></form></article>
+          <article class="panel"><div class="panel-heading"><div><h2>Print limits</h2><p>Saving confirms resource and monitoring-loss policy.</p></div></div><form id="policy-form" class="form-grid"><label>Maximum hours<input name="max_hours" type="number" min="0.1" step="0.1" required></label><label>Maximum grams<input name="max_grams" type="number" min="1" step="1" required></label><label>Monitoring loss (seconds)<input name="monitoring_loss_seconds" type="number" min="1" step="1" required></label><label>On monitoring loss<select name="pause_on_monitoring_loss"><option value="true">Pause job</option><option value="false">Continue current print; hold new starts</option></select></label><div class="wide form-actions"><button class="primary" type="submit">Confirm limits & policy</button></div></form></article></div>
+      </section>
+
+      <section id="view-chat" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">LOCAL ASSISTANT</div><h1>Conversations</h1><p>Messages are processed by your configured local service.</p></div><div class="form-actions"><label class="conversation-picker">History<select id="conversation-history" aria-label="Conversation history"></select></label><button id="new-conversation" class="secondary" type="button">＋ New conversation</button></div></div>
+        <article class="panel conversation-panel"><div id="conversation-list" class="conversation-list empty-state">No conversations yet.</div><form id="chat-form" class="chat-form"><textarea name="message" required rows="3" maxlength="12000" placeholder="Ask about a model, preparation or a held job…"></textarea><button class="primary" type="submit">Send</button></form></article>
+      </section>
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    </main>
+  </div>
+</body>
+</html>

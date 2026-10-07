@@ -2553,15 +2553,17 @@ void Sidebar::update_all_preset_comboboxes()
             connection_btn->Show();
         //   ams_btn->Hide();
         auto     print_btn_type = MainFrame::PrintSelectType::eSendToLocalNetPrinter;
-        wxString url = cfg.opt_string("print_host_webui").empty() ? cfg.opt_string("print_host") : cfg.opt_string("print_host_webui");
+        const wxString webui_url = cfg.has("print_host_webui") ? from_u8(cfg.opt_string("print_host_webui")) : wxString();
+        const wxString host_url = cfg.has("print_host") ? from_u8(cfg.opt_string("print_host")) : wxString();
+        wxString url = webui_url.empty() ? host_url : webui_url;
         wxString apikey;
         if (url.empty())
             url = wxString::Format("file://%s/web/orca/missing_connection.html", from_u8(resources_dir()));
         else {
             if (!url.Lower().starts_with("http"))
                 url = wxString::Format("http://%s", url);
-            const auto host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
-            if (cfg.has("printhost_apikey") && (host_type != htSimplyPrint))
+            const auto *host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
+            if (cfg.has("printhost_apikey") && host_type != nullptr && host_type->value != htSimplyPrint)
                 apikey = cfg.opt_string("printhost_apikey");
             print_btn_type = preset_bundle.is_bbl_vendor() ? MainFrame::PrintSelectType::ePrintPlate :
                                                              MainFrame::PrintSelectType::eSendToLocalNetPrinter;
@@ -2572,7 +2574,8 @@ void Sidebar::update_all_preset_comboboxes()
         p_mainframe->set_print_button_to_default(print_btn_type);
     }
 
-    if (cfg.opt_bool("pellet_modded_printer")) {
+    const bool pellet_modded_printer = cfg.has("pellet_modded_printer") && cfg.opt_bool("pellet_modded_printer");
+    if (pellet_modded_printer) {
         p->m_staticText_filament_settings->SetLabel(_L("Pellets"));
         p->m_filament_icon->SetBitmap_("pellets");
     } else {
@@ -2581,7 +2584,8 @@ void Sidebar::update_all_preset_comboboxes()
     }
 
     if (nullptr != m_bed_type_list) {
-        if (is_bbl_vendor || cfg.opt_bool("support_multi_bed_types")) {
+        const bool supports_multiple_bed_types = cfg.has("support_multi_bed_types") && cfg.opt_bool("support_multi_bed_types");
+        if (is_bbl_vendor || supports_multiple_bed_types) {
             m_bed_type_list->Enable();
             auto str_bed_type = wxGetApp().app_config->get_printer_setting(wxGetApp().preset_bundle->printers.get_selected_preset_name(),
                                                                            "curr_bed_type");
@@ -14474,7 +14478,9 @@ void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
     } else {
         if (new_sel == MainFrame::tpMonitor && wxGetApp().preset_bundle != nullptr) {
             auto     cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-            wxString url = cfg.opt_string("print_host_webui").empty() ? cfg.opt_string("print_host") : cfg.opt_string("print_host_webui");
+            const wxString webui_url = cfg.has("print_host_webui") ? from_u8(cfg.opt_string("print_host_webui")) : wxString();
+            const wxString host_url = cfg.has("print_host") ? from_u8(cfg.opt_string("print_host")) : wxString();
+            const wxString url = webui_url.empty() ? host_url : webui_url;
             if (main_frame->m_printer_view && url.empty()) {
                 // It's missing_connection page, reload so that we can replay the gif image
                 main_frame->m_printer_view->reload();
@@ -19299,8 +19305,10 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files,
     // BBS: wish to reset all plates stats item selected state when load a new file
     p->preview->get_canvas3d()->reset_select_plate_toolbar_selection();
 
-    // [NEW] Reset geometry modification marker when loading new file
-    try {
+    // The one-shot local-agent Plater runs in a private process and must not
+    // submit model paths or fingerprints to the normal analytics pipeline.
+    if (!wxGetApp().is_local_agent_helper()) {
+      try {
         AnalyticsDataUploadManager::ProjectModificationTracker::getInstance().reset();
         // Sync-reset AnalyticsProjectInfo (file_format/url/model_id etc.), prevent stale 3MF async callback
         AnalyticsDataUploadManager::getInstance().clear_analytics_project_info();
@@ -19316,12 +19324,13 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files,
             AnalyticsDataUploadManager::getInstance().mark_analytics_project_info(
                 input_files[0].string(), "", "", ext, input_files[0].filename().string());
         }
-    } catch (const std::exception& e) {
+      } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(warning) << "[Modification] Failed to reset modification tracker: " << e.what();
+      }
     }
 
     // 【新增】异步计算3MF文件指纹（不阻塞UI）
-    for (const auto& file_path : input_files) {
+    if (!wxGetApp().is_local_agent_helper()) for (const auto& file_path : input_files) {
         if (file_path.extension() == ".3mf") {
             try {
                 // 异步计算并设置 model_id（不阻塞主线程）
@@ -20157,6 +20166,8 @@ int Plater::get_3mf_file_count(std::vector<fs::path> paths)
 }
 
 void Plater::import_model_event(const std::vector<fs::path>& paths) {
+    if (wxGetApp().is_local_agent_helper() || paths.empty())
+        return;
     bool is_single_3mf = (paths.size() == 1 && boost::algorithm::iends_with(paths[0].string(), ".3mf"));
 
     if (!is_single_3mf) {

@@ -26,6 +26,8 @@
 #include <wx/uri.h>
 #include <wx/utils.h>
 #include <wx/image.h>
+#include <wx/filename.h>
+#include <wx/stdpaths.h>
 #include <wx/mstream.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/log/trivial.hpp>
@@ -33,6 +35,7 @@
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <algorithm>
+#include <cctype>
 #include <initializer_list>
 #include <cmath>
 #include <ctime>
@@ -343,12 +346,24 @@ MCPChatPanel::MCPChatPanel(wxWindow* parent, wxWindowID id, const wxPoint& pos, 
     , m_scene_update_timer(this)
     , m_scheduled_refresh_timer(this)
 {
-    const auto& user = wxGetApp().get_user();
-    m_gateway_user_id = user.userId;
-    m_gateway_user_token = user.token;
+    m_local_agent_helper_mode = wxGetApp().is_local_agent_helper();
+    if (m_local_agent_helper_mode)
+        m_local_agent_mode = true;
+    if (!m_local_agent_mode) {
+        const auto& user = wxGetApp().get_user();
+        m_gateway_user_id = user.userId;
+        m_gateway_user_token = user.token;
+    }
 
     InitWebView();
     RegisterAllHandlers();
+
+    if (m_local_agent_mode) {
+        if (!m_local_agent_helper_mode)
+            m_local_agent_bridge = std::make_unique<Bridge::LocalAgentBridge>();
+        LoadChatPage();
+        return;
+    }
     
 
     // Start 300ms auto-push timer
@@ -469,8 +484,10 @@ MCPChatPanel::~MCPChatPanel()
     }
     m_browser = nullptr;
     m_async_lifetime.reset();
+    m_local_agent_bridge.reset();
 
-    Bridge::SlicerBridge::Instance().ClearSendToPrinterDelegate(this);
+    if (!m_local_agent_mode)
+        Bridge::SlicerBridge::Instance().ClearSendToPrinterDelegate(this);
     UnregisterEmbeddedAIChatPanel(this);
 
     if (m_export_event_source) {
@@ -519,7 +536,11 @@ void MCPChatPanel::InitWebView()
     m_browser->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &MCPChatPanel::OnScriptMessage, this);
     m_browser->Bind(wxEVT_WEBVIEW_NAVIGATING, &MCPChatPanel::OnNavigationRequest, this);
     // target="_blank" 新窗口请求也用系统浏览器打开
-    m_browser->Bind(wxEVT_WEBVIEW_NEWWINDOW, [](wxWebViewEvent& evt) {
+    m_browser->Bind(wxEVT_WEBVIEW_NEWWINDOW, [this](wxWebViewEvent& evt) {
+        if (m_local_agent_mode) {
+            evt.Veto();
+            return;
+        }
         const wxString url = evt.GetURL();
         if (!url.IsEmpty())
             wxLaunchDefaultBrowser(url);
@@ -527,10 +548,12 @@ void MCPChatPanel::InitWebView()
     });
     m_browser->Bind(wxEVT_WEBVIEW_LOADED, &MCPChatPanel::OnNavigationComplete, this);
     m_browser->Bind(wxEVT_WEBVIEW_ERROR, &MCPChatPanel::OnError, this);
-    m_browser->EnableAccessToDevTools();
+    if (!m_local_agent_mode)
+        m_browser->EnableAccessToDevTools();
 
     // Bind scheduled refresh timer
-    Bind(wxEVT_TIMER, &MCPChatPanel::OnScheduledRefreshTimer, this, m_scheduled_refresh_timer.GetId());
+    if (!m_local_agent_mode)
+        Bind(wxEVT_TIMER, &MCPChatPanel::OnScheduledRefreshTimer, this, m_scheduled_refresh_timer.GetId());
 
     wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
     sizer->Add(m_browser, 1, wxEXPAND);
@@ -541,6 +564,13 @@ void MCPChatPanel::InitWebView()
 void MCPChatPanel::OnNavigationRequest(wxWebViewEvent& evt)
 {
     const wxString url = evt.GetURL();
+    if (m_local_agent_mode) {
+        if (!m_local_agent_page_url.IsEmpty() &&
+            (url == m_local_agent_page_url || url.StartsWith(m_local_agent_page_url + "#")))
+            return;
+        evt.Veto();
+        return;
+    }
     // 非 http/https（如 file://、about:blank、blob: 等）直接放行。
     if (!url.StartsWith("http://") && !url.StartsWith("https://"))
         return;
@@ -578,6 +608,18 @@ void MCPChatPanel::LoadChatPage()
     m_js_ready = false;
     m_chat_page_origin.Clear();
 
+    if (m_local_agent_mode) {
+        const std::string page = Slic3r::resources_dir() + "/web/local_agent/" +
+            (m_local_agent_helper_mode ? "helper.html" : "index.html");
+        m_local_agent_page_url = wxFileName::FileNameToURL(from_u8(page));
+        const wxString local_url = m_local_agent_page_url;
+        CallAfter([this, local_url]() {
+            if (m_browser)
+                m_browser->LoadURL(local_url);
+        });
+        return;
+    }
+
     wxString url = build_chat_page_url(m_cxagent_api_base);
     BOOST_LOG_TRIVIAL(info) << "[MCPChatPanel] Loading chat page: "
                             << url.ToUTF8().data();
@@ -596,6 +638,107 @@ void MCPChatPanel::LoadChatPage()
 void MCPChatPanel::OnScriptMessage(wxWebViewEvent& evt)
 {
     wxString strInput = evt.GetString();
+    if (m_local_agent_mode) {
+        // WebView script messages are accepted only from the bundled local page.
+        const wxString current_url = m_browser ? m_browser->GetCurrentURL() : wxString();
+        if (m_local_agent_page_url.IsEmpty() || current_url.IsEmpty() ||
+            (current_url != m_local_agent_page_url &&
+            !current_url.StartsWith(m_local_agent_page_url + "#"))
+           )
+            return;
+        const std::string input(strInput.ToUTF8().data());
+        const json request = json::parse(input, nullptr, false);
+        if (request.is_discarded() || !request.is_object() || !request.contains("command") ||
+            !request["command"].is_string() ||
+            request["command"].get<std::string>() != "local_agent_request")
+            return;
+        if (!request.contains("data") || !request["data"].is_object() || !m_local_agent_bridge)
+            return;
+        const json& data = request["data"];
+        if (!data.contains("request_id") || !data["request_id"].is_string() ||
+            !data.contains("action") || !data["action"].is_string() ||
+            !data.contains("payload") || !data["payload"].is_object() ||
+            !data.contains("idempotency_key") || !data["idempotency_key"].is_string())
+            return;
+        const std::string request_id = data["request_id"].get<std::string>();
+        const std::string action = data["action"].get<std::string>();
+        const json payload = data["payload"];
+        const std::string idempotency_key = data["idempotency_key"].get<std::string>();
+        std::weak_ptr<int> lifetime = m_async_lifetime;
+        m_local_agent_bridge->Request(request_id, action, payload, idempotency_key,
+            [this, lifetime, action, payload](const json& result) {
+                if (lifetime.expired())
+                    return;
+                json client_result = result;
+                if (action == "open_project" && result.value("ok", false)) {
+                    json output = result.value("result", json::object());
+                    if (!output.is_object())
+                        output = json::object();
+                    const std::string project_path = output.contains("project_path") &&
+                        output["project_path"].is_string()
+                        ? output["project_path"].get<std::string>() : std::string();
+                    const std::string job_id = payload.contains("job_id") && payload["job_id"].is_string()
+                        ? payload["job_id"].get<std::string>() : std::string();
+                    const char* configured_home = std::getenv("CREALITY_AGENT_HOME");
+                    const boost::filesystem::path runtime = configured_home && *configured_home
+                        ? boost::filesystem::path(configured_home)
+                        : boost::filesystem::path(wxGetHomeDir().ToStdString()) /
+                            "Library/Application Support/CrealityAgent/runtime";
+                    output["inspection_started"] = false;
+                    const bool valid_job_id = job_id.size() == 32 &&
+                        std::all_of(job_id.begin(), job_id.end(), [](unsigned char c) {
+                            return std::isxdigit(c) != 0;
+                        });
+                    try {
+                      if (valid_job_id && !project_path.empty()) {
+                        const auto jobs_root = boost::filesystem::canonical(runtime / "jobs");
+                        const auto project = boost::filesystem::canonical(project_path);
+                        const auto expected_job = boost::filesystem::canonical(jobs_root / job_id);
+                        const auto relative = project.lexically_relative(expected_job);
+                        const bool descendant = !relative.empty() && !relative.is_absolute() &&
+                            *relative.begin() != "..";
+                        if (expected_job.parent_path() == jobs_root &&
+                            expected_job.filename().string() == job_id && descendant && project.extension() == ".3mf") {
+#ifdef __APPLE__
+                            const wxString sandbox = "/usr/bin/sandbox-exec";
+                            if (boost::filesystem::exists(sandbox.ToStdString())) {
+                                std::vector<std::string> storage = {
+                                    "/usr/bin/sandbox-exec", "-p",
+                                    "(version 1)(allow default)(deny network*)",
+                                    wxStandardPaths::Get().GetExecutablePath().ToStdString(),
+                                    "--local-agent-inspect", project.string()
+                                };
+                                std::vector<const char*> argv;
+                                for (const auto& arg : storage) argv.push_back(arg.c_str());
+                                argv.push_back(nullptr);
+                                output["inspection_started"] = wxExecute(argv.data(), wxEXEC_ASYNC) > 0;
+                            } else {
+                                output["inspection_started"] = false;
+                            }
+#else
+                            std::vector<std::string> storage = {
+                                wxStandardPaths::Get().GetExecutablePath().ToStdString(),
+                                "--local-agent-inspect", project.string()
+                            };
+                            std::vector<const char*> argv;
+                            for (const auto& arg : storage) argv.push_back(arg.c_str());
+                            argv.push_back(nullptr);
+                            output["inspection_started"] = wxExecute(argv.data(), wxEXEC_ASYNC) > 0;
+#endif
+                        }
+                      }
+                    } catch (const boost::filesystem::filesystem_error&) {
+                        // Invalid or stale service artifact; surface its response without opening it.
+                        output["inspection_started"] = false;
+                    }
+                    output.erase("project_path");
+                    if (client_result.contains("result"))
+                        client_result["result"] = std::move(output);
+                }
+                SendCommandToJS("local_agent_result", client_result);
+            });
+        return;
+    }
     BOOST_LOG_TRIVIAL(trace) << "[MCPChatPanel] OnScriptMessage: " << strInput.ToUTF8().data();
 
     const std::string utf8_input = std::string(strInput.ToUTF8().data());
@@ -657,8 +800,23 @@ void MCPChatPanel::HandleOpenDeviceList(const nlohmann::json& data)
 
 void MCPChatPanel::OnNavigationComplete(wxWebViewEvent& evt)
 {
-    BOOST_LOG_TRIVIAL(info) << "[MCPChatPanel] Page loaded: " << evt.GetURL().ToUTF8().data();
     m_page_loaded = true;
+
+    if (m_local_agent_mode) {
+        BOOST_LOG_TRIVIAL(info) << "[MCPChatPanel] Bundled local agent page loaded";
+        m_js_ready = true;
+        if (m_local_agent_bridge) {
+            std::weak_ptr<int> lifetime = m_async_lifetime;
+            m_local_agent_bridge->Request("bootstrap", "state", json::object(), std::string(),
+                [this, lifetime](const json& result) {
+                    if (!lifetime.expired())
+                        SendCommandToJS("local_agent_result", result);
+                });
+        }
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "[MCPChatPanel] Page loaded: " << evt.GetURL().ToUTF8().data();
 
     // Sync the current app theme on first load so the web card does not stay in light mode.
     NotifyThemeChanged();
@@ -676,6 +834,10 @@ void MCPChatPanel::OnNavigationComplete(wxWebViewEvent& evt)
 }
 void MCPChatPanel::OnError(wxWebViewEvent& evt)
 {
+    if (m_local_agent_mode) {
+        BOOST_LOG_TRIVIAL(error) << "[MCPChatPanel] Bundled local agent WebView error";
+        return;
+    }
     BOOST_LOG_TRIVIAL(error) << "[MCPChatPanel] WebView error: " << evt.GetString().ToUTF8().data();
 }
 
@@ -727,6 +889,8 @@ void MCPChatPanel::OpenExternalBrowserFromJS(const json& data)
 
 void MCPChatPanel::OnSceneUpdateTimer(wxTimerEvent& /*evt*/)
 {
+    if (m_local_agent_mode)
+        return;
     if (!m_js_ready) return;
     auto& bridge = Bridge::SlicerBridge::Instance();
     json result = bridge.Execute(Bridge::ActionID::GET_SLICER_STATE, json::object());
@@ -2325,6 +2489,8 @@ void MCPChatPanel::SendAgentEvent(const std::string& event_name, const json& dat
 
 void MCPChatPanel::NotifyModelImported(const json& data)
 {
+    if (m_local_agent_mode)
+        return;
     BOOST_LOG_TRIVIAL(warning)
         << "[MCPChatPanel] NotifyModelImported data=" << data.dump();
     SendCommandToJS("model_import", data);
@@ -2389,6 +2555,10 @@ void MCPChatPanel::NotifyModelImported(const json& data)
 }
 void MCPChatPanel::ReloadChat()
 {
+    if (m_local_agent_mode) {
+        LoadChatPage();
+        return;
+    }
     if (auto* cfg = wxGetApp().app_config) {
         const std::string api_base = cfg->get("cxagent_api_base");
         if (!api_base.empty())
@@ -2406,6 +2576,8 @@ void MCPChatPanel::ReloadChat()
 }
 void MCPChatPanel::SetCxAgentApiBaseAndReload(const std::string& api_base)
 {
+    if (m_local_agent_mode)
+        return;
     m_cxagent_api_base = api_base;
     if (auto* cfg = wxGetApp().app_config) {
         cfg->set("cxagent_api_base", m_cxagent_api_base);
@@ -2417,6 +2589,8 @@ void MCPChatPanel::SetCxAgentApiBaseAndReload(const std::string& api_base)
 
 void MCPChatPanel::NotifySceneChanged()
 {
+    if (m_local_agent_mode)
+        return;
     // Restart the one-shot timer (300ms debounce).
     // If the timer is already running, Stop+StartOnce resets the countdown.
     m_scene_update_timer.Stop();
@@ -2431,6 +2605,8 @@ void MCPChatPanel::NotifySceneChanged()
 
 void MCPChatPanel::NotifyCxAgentStatus()
 {
+    if (m_local_agent_mode)
+        return;
     const json status = BuildCxAgentStatusJson();
     const bool connected = status.value("connected", false);
     SendCommandToJS(connected ? "cxagent_connected" : "cxagent_status", status);
@@ -2438,6 +2614,8 @@ void MCPChatPanel::NotifyCxAgentStatus()
 
 void MCPChatPanel::NotifyGatewayUser(bool send_empty_user)
 {
+    if (m_local_agent_mode)
+        return;
     const auto& user = wxGetApp().get_user();
     if (send_empty_user) {
         m_gateway_user_id.clear();
@@ -2558,6 +2736,8 @@ bool MCPChatPanel::OpenSendWorkflowFromScene()
 
 void MCPChatPanel::ScheduleSceneRefresh(int max_retries)
 {
+    if (m_local_agent_mode)
+        return;
     m_pending_refresh_count = max_retries;
     m_scheduled_refresh_timer.Stop();
     m_scheduled_refresh_timer.StartOnce(500);  // First check after 500ms
@@ -2565,6 +2745,8 @@ void MCPChatPanel::ScheduleSceneRefresh(int max_retries)
 
 void MCPChatPanel::OnScheduledRefreshTimer(wxTimerEvent& /*evt*/)
 {
+    if (m_local_agent_mode)
+        return;
     if (m_pending_refresh_count <= 0) {
         m_scheduled_refresh_timer.Stop();
         return;
@@ -3252,4 +3434,3 @@ void MCPChatPanel::HandleLoadTrendingModels(int page, int page_size)
 
 } // namespace GUI
 } // namespace Slic3r
-

@@ -6,6 +6,9 @@
 
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#ifdef CREALITY_LOCAL_AGENT
+#include "slic3r/GUI/LocalAgentProjectHelper.hpp"
+#endif
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/InstanceCheck.hpp"
 #include "slic3r/GUI/format.hpp"
@@ -17,6 +20,9 @@
 #include <boost/algorithm/string.hpp> // icontains, for the alpha version folder
 #include <boost/log/trivial.hpp>
 #include <memory>
+#include <filesystem>
+#include <sstream>
+#include <wx/utils.h>
 
 // To show a message box if GUI initialization ends up with an exception thrown.
 #include <wx/msgdlg.h>
@@ -69,6 +75,124 @@ static boost::filesystem::path macos_crash_log_dir()
 
 int GUI_Run(int argc, char **argv)
 {
+#ifdef CREALITY_LOCAL_AGENT
+    // Native config normalization is intentionally headless: it must not create
+    // GUI state, private helper profiles, or pass through wxEntry.
+    if (argc > 1 && argv && argv[1] && std::string(argv[1]) == "--local-agent-normalize")
+        return run_local_agent_normalize_cli(argc, argv);
+
+    // Detect helper switches before the normal CLI parser. The service passes
+    // --datadir <per-job-private-dir>; no other ordinary GUI flags are accepted
+    // with helper mode. This happens before GUI_App construction and IPC setup.
+    bool has_local_agent_switch = false;
+    for (int i = 1; argv && i < argc; ++i) {
+        if (argv[i] && (std::string(argv[i]) == "--local-agent-prepare" ||
+                        std::string(argv[i]) == "--local-agent-inspect")) {
+            has_local_agent_switch = true;
+            break;
+        }
+    }
+    if (has_local_agent_switch) {
+        std::string action;
+        std::string operand;
+        std::string requested_data_dir;
+        bool saw_data_dir = false;
+        bool saw_action = false;
+        for (int i = 1; i < argc; ++i) {
+            if (!argv || !argv[i])
+                return 2;
+            const std::string arg(argv[i]);
+            if (arg == "--datadir") {
+                if (saw_data_dir || i + 1 >= argc || !argv[i + 1]) {
+                    boost::nowide::cerr << "Invalid isolated helper arguments" << std::endl;
+                    return 2;
+                }
+                saw_data_dir = true;
+                requested_data_dir = argv[++i];
+            } else if (arg == "--local-agent-prepare" || arg == "--local-agent-inspect") {
+                if (saw_action || i + 1 >= argc || !argv[i + 1]) {
+                    boost::nowide::cerr << "Invalid isolated helper arguments" << std::endl;
+                    return 2;
+                }
+                saw_action = true;
+                action = arg == "--local-agent-prepare" ? "prepare" : "inspect";
+                operand = argv[++i];
+            } else {
+                boost::nowide::cerr << "Unsupported argument with isolated helper mode" << std::endl;
+                return 2;
+            }
+        }
+        if (!saw_action || operand.empty()) {
+            boost::nowide::cerr << "Invalid isolated helper arguments" << std::endl;
+            return 2;
+        }
+
+        GUI_InitParams params;
+        params.argc = argc;
+        params.argv = argv;
+        params.local_agent_helper = true;
+        params.local_agent_action = action;
+        std::error_code argument_error;
+        const auto argument_path = std::filesystem::absolute(std::filesystem::u8path(operand), argument_error);
+        if (argument_error) {
+            boost::nowide::cerr << "Local-agent helper requires an accessible absolute path" << std::endl;
+            return 2;
+        }
+        params.local_agent_argument = argument_path.lexically_normal().u8string();
+        std::error_code ec;
+        std::filesystem::path private_dir;
+        if (saw_data_dir) {
+            private_dir = std::filesystem::absolute(std::filesystem::u8path(requested_data_dir), ec).lexically_normal();
+            if (ec || private_dir.empty()) {
+                boost::nowide::cerr << "Invalid isolated helper data directory" << std::endl;
+                return 2;
+            }
+            const auto status = std::filesystem::symlink_status(private_dir, ec);
+            const bool exists = !ec && std::filesystem::exists(status);
+            if (ec && ec != std::errc::no_such_file_or_directory) {
+                boost::nowide::cerr << "Isolated helper data directory is unavailable" << std::endl;
+                return 2;
+            }
+            ec.clear();
+            if (exists) {
+                const std::filesystem::directory_iterator first(private_dir, ec);
+                if (ec || std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status) ||
+                    first != std::filesystem::directory_iterator()) {
+                    boost::nowide::cerr << "Isolated helper data directory must be a new empty directory" << std::endl;
+                    return 2;
+                }
+            } else {
+                std::filesystem::create_directories(private_dir, ec);
+                if (ec) {
+                    boost::nowide::cerr << "Local-agent helper could not create its private profile directory" << std::endl;
+                    return 2;
+                }
+            }
+        } else {
+            private_dir = std::filesystem::temp_directory_path() /
+                ("CrealityPrint-local-agent-" + std::to_string(static_cast<unsigned long long>(wxGetProcessId())));
+            const bool created = std::filesystem::create_directory(private_dir, ec);
+            if (ec || !created) {
+                boost::nowide::cerr << "Local-agent helper could not create its private profile directory" << std::endl;
+                return 2;
+            }
+        }
+        const auto final_status = std::filesystem::symlink_status(private_dir, ec);
+        if (ec || std::filesystem::is_symlink(final_status) || !std::filesystem::is_directory(final_status)) {
+            boost::nowide::cerr << "Local-agent helper data directory is not private" << std::endl;
+            return 2;
+        }
+        std::filesystem::permissions(private_dir, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace, ec);
+        if (ec) {
+            boost::nowide::cerr << "Local-agent helper could not protect its private profile directory" << std::endl;
+            return 2;
+        }
+        set_data_dir(private_dir.u8string());
+        return GUI_Run(params);
+    }
+#endif // CREALITY_LOCAL_AGENT
+
     DynamicPrintAndCommandLineConfig config;
     DynamicPrintConfig extra_config;
     std::vector<std::string> input_files;
@@ -144,12 +268,12 @@ int GUI_Run(GUI_InitParams &params)
         //GUI::GUI_App* gui = new GUI::GUI_App(params.start_as_gcodeviewer ? GUI::GUI_App::EAppMode::GCodeViewer : GUI::GUI_App::EAppMode::Editor);
         const bool enable_test = params.argc >= 2 && params.argv != nullptr && params.argv[1] != nullptr &&
                                  std::string(params.argv[1]) == TEST_MODE_ARGUMENT;
-        GUI::GUI_App* gui = new GUI::GUI_App(enable_test);
+        GUI::GUI_App* gui = new GUI::GUI_App(enable_test, params.local_agent_helper);
         //if (gui->get_app_mode() != GUI::GUI_App::EAppMode::GCodeViewer) {
             // G-code viewer is currently not performing instance check, a new G-code viewer is started every time.
             bool gui_single_instance_setting = gui->app_config->get("app", "single_instance") == "true";
             BOOST_LOG_TRIVIAL(warning) << "GUI_Run: single_instance setting=" << (gui_single_instance_setting ? "true" : "false");
-            // Extra diagnostics: current PID and whether we see a minidump argument
+        // Extra diagnostics: current PID and whether we see a minidump argument
             bool has_minidump_arg = false;
             if (params.argc > 1 && params.argv && params.argv[1]) {
                 has_minidump_arg = boost::starts_with(std::string(params.argv[1]), "minidump://file=");
@@ -158,7 +282,9 @@ int GUI_Run(GUI_InitParams &params)
             BOOST_LOG_TRIVIAL(warning) << "macOS GUI_Run: current pid=" << getpid() << ", has_minidump_arg=" << (has_minidump_arg ? "true" : "false");
 #endif
             // In minidump relaunch scenario, skip single-instance check to allow a dedicated dump handler instance.
-            if (has_minidump_arg) {
+            if (params.local_agent_helper) {
+                BOOST_LOG_TRIVIAL(info) << "GUI_Run: isolated local-agent helper; skipping single-instance forwarding";
+            } else if (has_minidump_arg) {
                 BOOST_LOG_TRIVIAL(warning) << "GUI_Run: detected minidump argument -> skipping single-instance check to allow crash report flow";
             } else {
                 if (Slic3r::instance_check(params.argc, params.argv, gui_single_instance_setting)) {

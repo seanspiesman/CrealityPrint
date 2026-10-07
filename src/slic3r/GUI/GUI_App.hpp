@@ -224,6 +224,8 @@ private:
     bool            m_app_conf_exists{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };
     bool            m_is_recreating_gui{ false };
+    bool            m_local_agent_helper { false };
+    int             m_local_agent_helper_exit_code { 0 };
 #ifdef __linux__
     bool            m_opengl_initialized{ false };
 #endif
@@ -350,6 +352,8 @@ private:
     void            check_filaments_in_blacklist(std::string tag_supplier, std::string tag_material, bool& in_blacklist, std::string& action, std::string& info);
     std::string     get_local_models_path();
     bool            OnInit() override;
+    int             OnRun() override;
+    void            set_local_agent_helper_exit_code(int code) { m_local_agent_helper_exit_code = code; }
     int             OnExit() override;
     void            init_user_profile();
     void            track_event(const std::string& event, const std::string& data);
@@ -373,7 +377,7 @@ private:
     bool m_update_force_full = false;
 
     //BBS: remove GCodeViewer as seperate APP logic
-    explicit GUI_App(bool enable_test = false);
+    explicit GUI_App(bool enable_test = false, bool local_agent_helper = false);
     //explicit GUI_App(EAppMode mode = EAppMode::Editor);
     ~GUI_App() override;
 
@@ -719,6 +723,7 @@ private:
     bool            is_enable_test() { return m_enable_test; }
     // Parameters extracted from the command line to be passed to GUI after initialization.
     GUI_InitParams* init_params { nullptr };
+    bool is_local_agent_helper() const;
 
     AppConfig*      app_config{ nullptr };
     AppConfig*           m_appconfig_new{nullptr};
