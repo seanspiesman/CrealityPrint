@@ -33,6 +33,8 @@ def budget_fingerprint(job: dict) -> str:
 def local_origin(url: str) -> tuple[str, str, str]:
     """Pin local model hosts without allowing a cloud redirect or DNS rebinding."""
     from urllib.parse import urlsplit
+    if not isinstance(url, str):
+        raise ServiceError("Model endpoint must be a local HTTP(S) base URL", 422)
     parts = urlsplit(url)
     if parts.query or parts.fragment or parts.username or parts.password:
         raise ServiceError("Model endpoint must be a local HTTP(S) base URL without credentials")
@@ -62,6 +64,11 @@ async def dispatch(engine, action: str, payload: dict):
     def exact(required=(), optional=()):
         if set(payload) - set(required) - set(optional) or any(k not in payload for k in required):
             raise ServiceError("Invalid action fields", 422)
+        for key in ("job_id", "printer_id", "profile_id", "artifact_id", "question_id", "conversation_id"):
+            if key not in payload or (key == "conversation_id" and key in optional and payload[key] is None):
+                continue
+            if not isinstance(payload[key], str) or not 0 < len(payload[key]) <= 128:
+                raise ServiceError("Invalid action identifier", 422)
 
     if action == "create_job":
         return engine.public_job(await engine.create(JobRequest.model_validate(payload)))

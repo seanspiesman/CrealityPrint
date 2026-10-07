@@ -5,9 +5,12 @@
   const pending = new Map();
   let sequence = 0;
   let activeConversation = "";
+  let conversationSelectionRevision = 0;
   let printerFormOwner = "";
   let printerFormDirty = false;
+  let printerEditRevision = 0;
   let cfsFormDirty = false;
+  let cfsEditRevision = 0;
   let toastTimer = 0;
 
   const byId = (id) => document.getElementById(id);
@@ -20,7 +23,7 @@
   };
   const safeError = (value) => String(value || "The local service could not complete that request.").slice(0, 600);
 
-  function request(action, payload = {}) {
+  function request(action, payload = {}, uiContext = {}) {
     if (!window.wx || typeof window.wx.postMessage !== "function") {
       setConnection(false);
       showToast("The native local service bridge is unavailable.", true);
@@ -28,7 +31,7 @@
     }
     const requestId = `${Date.now()}-${++sequence}`;
     const key = action === "state" ? "" : makeId();
-    pending.set(requestId, { action, payload });
+    pending.set(requestId, { action, payload, ...uiContext });
     window.wx.postMessage(JSON.stringify({
       command: "local_agent_request",
       data: { request_id: requestId, action, payload, idempotency_key: key },
@@ -61,6 +64,11 @@
     const pendingRequest = pending.get(result.request_id) || {};
     const action = pendingRequest.action || "";
     pending.delete(result.request_id);
+    if (action === "get_conversation" &&
+        (!pendingRequest.payload || pendingRequest.payload.conversation_id !== activeConversation)) return;
+    if ((action === "chat" || action === "new_conversation") &&
+        (pendingRequest.selectionRevision !== conversationSelectionRevision ||
+         pendingRequest.selectionTarget !== activeConversation)) return;
     if (!result.ok) {
       setConnection(action === "state" ? false : true);
       showToast(safeError(result.error), true);
@@ -77,11 +85,20 @@
       return;
     }
     if (action === "get_conversation") {
+      const requestedConversation = pendingRequest.payload && pendingRequest.payload.conversation_id;
+      const conversation = result.result;
+      if (!requestedConversation || requestedConversation !== activeConversation ||
+          !conversation || conversation.id !== requestedConversation) return;
       state.activeConversation = result.result || null;
       renderConversation();
       return;
     }
-    if (action === "save_cfs_inventory") cfsFormDirty = false;
+    if (action === "enroll_printer" && pendingRequest.formRevision === printerEditRevision &&
+        pendingRequest.formTarget === byId("printer-id").value)
+      printerFormDirty = false;
+    if (action === "save_cfs_inventory" && pendingRequest.formRevision === cfsEditRevision &&
+        pendingRequest.formTarget === byId("cfs-printer").value)
+      cfsFormDirty = false;
     if (action === "open_project") {
       showToast(result.result && result.result.inspection_started
         ? "Opening the saved project in an isolated inspection window."
@@ -289,10 +306,16 @@
   }
 
   function markCfsDirty() {
+    cfsEditRevision += 1;
     cfsFormDirty = true;
     const selected = byId("cfs-printer").value;
     text(byId("cfs-dirty-label"), selected
       ? `Unsaved edits · will save to ${selected}` : "Unsaved edits · choose a printer before saving");
+  }
+
+  function markPrinterDirty() {
+    printerEditRevision += 1;
+    printerFormDirty = true;
   }
 
   function makeCfsSlotRow(slot = {}) {
@@ -508,17 +531,18 @@
       frame_sequence_header: v.frame_sequence_header || null, frame_time_header: v.frame_time_header || null,
       bed_detector_url: v.bed_detector_url || null, failure_detector_url: v.failure_detector_url || null,
       identity_confirmed: event.currentTarget.elements.identity_confirmed.checked,
-      filament_verified: event.currentTarget.elements.filament_verified.checked });
-    printerFormDirty = false;
+      filament_verified: event.currentTarget.elements.filament_verified.checked },
+    { formRevision: printerEditRevision, formTarget: v.printer_id });
   });
-  byId("printer-form").addEventListener("input", () => { printerFormDirty = true; });
+  byId("printer-form").addEventListener("input", markPrinterDirty);
   byId("printer-form").addEventListener("change", (event) => {
     if (event.target === byId("printer-id")) {
+      printerEditRevision += 1;
       printerFormDirty = false;
       printerFormOwner = event.target.value;
       const printer = (state.printers || []).find((candidate) => candidate.id === event.target.value);
       if (printer) populatePrinterForm(printer);
-    } else printerFormDirty = true;
+    } else markPrinterDirty();
   });
   byId("reference-form").addEventListener("submit", (event) => {
     event.preventDefault(); const v = formValues(event.currentTarget);
@@ -544,13 +568,15 @@
       showToast("Use unique slot IDs and non-negative remaining grams; up to 16 slots are allowed.", true);
       return;
     }
-    request("save_cfs_inventory", { printer_id: printerId, slots });
+    request("save_cfs_inventory", { printer_id: printerId, slots },
+      { formRevision: cfsEditRevision, formTarget: printerId });
   });
   byId("cfs-form").addEventListener("input", (event) => {
     if (event.target !== byId("cfs-printer")) markCfsDirty();
   });
   byId("cfs-form").addEventListener("change", (event) => {
     if (event.target === byId("cfs-printer")) {
+      cfsEditRevision += 1;
       if (cfsFormDirty) markCfsDirty();
       else renderCfsInventory();
     } else markCfsDirty();
@@ -563,6 +589,7 @@
     markCfsDirty();
   });
   byId("cfs-discard").addEventListener("click", () => {
+    cfsEditRevision += 1;
     cfsFormDirty = false;
     renderCfsInventory();
   });
@@ -592,10 +619,18 @@
     byId(id).addEventListener("input", (event) => { event.currentTarget.dataset.dirty = "true"; });
     byId(id).addEventListener("change", (event) => { event.currentTarget.dataset.dirty = "true"; });
   });
-  byId("new-conversation").addEventListener("click", () => request("new_conversation", {}));
+  byId("new-conversation").addEventListener("click", () => {
+    conversationSelectionRevision += 1;
+    request("new_conversation", {}, {
+      selectionRevision: conversationSelectionRevision,
+      selectionTarget: activeConversation,
+    });
+  });
   byId("conversation-history").addEventListener("change", (event) => {
+    conversationSelectionRevision += 1;
     activeConversation = event.currentTarget.value;
     state.activeConversation = null;
+    renderConversation();
     request("get_conversation", { conversation_id: activeConversation });
   });
   byId("chat-form").addEventListener("submit", (event) => {
@@ -603,7 +638,11 @@
     if (!message) return;
     const payload = { message };
     if (activeConversation) payload.conversation_id = activeConversation;
-    request("chat", payload); event.currentTarget.reset();
+    request("chat", payload, {
+      selectionRevision: conversationSelectionRevision,
+      selectionTarget: activeConversation,
+    });
+    event.currentTarget.reset();
   });
 
   document.addEventListener("click", (event) => {

@@ -49,6 +49,7 @@ class MainFrame;
 class ParamsDialog;
 class PrinterDialog;
 class WebModelLibraryView;
+class MCPChatPanel;
 enum QuickSlice
 {
     qsUndef = 0,
@@ -414,6 +415,9 @@ public:
     PrinterMgrView*       m_printer_mgr_view{nullptr};
     WebModelLibraryView*  m_webmodellibrary_view{ nullptr };
     WebModelLibraryView*  m_ai_creation_view{ nullptr };
+#ifdef CREALITY_LOCAL_AGENT
+    MCPChatPanel*         m_local_agent_workspace{ nullptr };
+#endif
     wxLogWindow*          m_log_window { nullptr };
     // BBS
     //wxBookCtrlBase*       m_tabpanel { nullptr };

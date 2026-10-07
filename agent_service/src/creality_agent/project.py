@@ -16,6 +16,7 @@ from defusedxml import ElementTree
 
 from .ingestion import sha256, validate_archive
 from .models import ServiceError
+from .native_config import MAX_BYTES, compare_settings, merge_expected, normalize_configs, strict_json
 from .slicer import _require_file, _stop_process
 
 
@@ -96,7 +97,7 @@ def _mesh_signature(vertices):
     return sorted(triangles)
 
 
-def verify_project(project, source, profiles, policy):
+def verify_project(project, source, profiles, policy, normalized=None):
     validate_archive(project, policy)
     if _mesh_signature(_triangles(source)) != _mesh_signature(_triangles(project)):
         raise ServiceError("Exported geometry differs from the requested source; preparation held")
@@ -104,7 +105,11 @@ def verify_project(project, source, profiles, policy):
         info = archive.getinfo("Metadata/project_settings.config")
         if info.file_size > 8 * 1024 * 1024:
             raise ServiceError("Project settings exceed the verification size limit")
-        actual = json.loads(archive.read(info))
+        actual = strict_json(archive.read(info))
+    if normalized is not None:
+        count = compare_settings(*normalized)
+        return {"geometry_verified": True, "settings_verified": True, "settings_count": count,
+                "project_sha256": sha256(project), "profile_sha256": profile_digest(profiles)}
     expected = {}
     for path in profiles:
         raw = json.loads(path.read_text())
@@ -135,6 +140,7 @@ async def export_project(engine, id, source, profile, folder):
     project = folder / "project.3mf"
     paths = [Path(p).resolve() for p in [*profile.settings, *profile.filaments]]
     digest = profile_digest(paths)
+    expected = merge_expected(await normalize_configs(executable, paths, folder))
     job = engine.store.get(id)
     manifest = {"version": 1, "request_id": request_id, "job_id": id, "model_path": str(source.resolve()),
                 "input_sha256": sha256(source), "settings": [str(p) for p in paths[:len(profile.settings)]],
@@ -166,7 +172,23 @@ async def export_project(engine, id, source, profile, folder):
             raise ServiceError("Native preparation manifest failed verification")
         if sha256(source) != manifest["input_sha256"] or profile_digest(paths) != digest:
             raise ServiceError("Source or profiles changed during native preparation")
-        verification = await asyncio.to_thread(verify_project, project, source, paths, engine.settings.policy)
+        project_digest = sha256(project)
+        validate_archive(project, engine.settings.policy)
+        with zipfile.ZipFile(project) as archive:
+            info = archive.getinfo("Metadata/project_settings.config")
+            if info.file_size > MAX_BYTES:
+                raise ServiceError("Project settings exceed the verification size limit")
+            settings_bytes = archive.read(info)
+        strict_json(settings_bytes)
+        actual_file = folder / "exported-settings.json"
+        actual_file.write_bytes(settings_bytes)
+        actual_file.chmod(0o600)
+        actual = (await normalize_configs(executable, [actual_file], folder))[0]
+        if (sha256(source) != manifest["input_sha256"] or profile_digest(paths) != digest
+                or sha256(project) != project_digest):
+            raise ServiceError("Source or profiles changed during project verification")
+        verification = await asyncio.to_thread(verify_project, project, source, paths,
+                                             engine.settings.policy, (expected, actual))
         return project, verification, result.get("warnings", [])
     except (TimeoutError, asyncio.CancelledError):
         await _stop_process(process, process_group=True)

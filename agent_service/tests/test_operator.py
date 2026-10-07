@@ -219,6 +219,11 @@ async def test_question_tools_have_no_owner_answer_tool(tmp_path):
     names = {t.name for t in await app.state.engine.agent_tools.list_tools()}
     assert {"request_owner_input", "list_questions"} <= names
     assert "answer_question" not in names
+    result = await app.state.engine.agent_tools.call_tool("request_owner_input", {
+        "question": "What mating diameter should this fit?", "idempotency_key": "mcp-question"})
+    assert not result.is_error and result.structured_content["status"] == "open"
+    listed = await app.state.engine.agent_tools.call_tool("list_questions", {})
+    assert listed.structured_content["items"][0]["id"] == result.structured_content["id"]
     await app.state.engine.close()
 
 
@@ -303,3 +308,12 @@ async def test_paused_job_observes_manual_printer_resume_without_sending_control
     await engine.monitor_paused(job)
     assert engine.store.get(job["id"])["state"] == "printing"
     await engine.close()
+
+
+def test_operator_rejects_malformed_identifiers_without_creating_history(tmp_path):
+    app = create_app(tmp_path, run_worker=False)
+    with TestClient(app, client=("127.0.0.1", 1234)) as client:
+        assert post(client, tmp_path, "get_conversation", {"conversation_id": None}).status_code == 422
+        assert post(client, tmp_path, "answer_question", {"question_id": {}, "answer": "test"}, "bad-q").status_code == 422
+        assert post(client, tmp_path, "save_model", {"base_url": {}, "model": "test"}, "bad-url").status_code == 422
+        assert not app.state.engine.store.conversations()

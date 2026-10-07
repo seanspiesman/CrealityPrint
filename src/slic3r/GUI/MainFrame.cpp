@@ -1335,6 +1335,9 @@ void MainFrame::destroy_webviews_for_recreate()
     destroy_view(m_webview);
     destroy_view(m_webmodellibrary_view);
     destroy_view(m_ai_creation_view);
+#ifdef CREALITY_LOCAL_AGENT
+    destroy_view(m_local_agent_workspace);
+#endif
     destroy_view(m_printer_view);
     destroy_view(m_printer_mgr_view);
 }
@@ -1449,6 +1452,10 @@ void MainFrame::init_tabpanel() {
                 topbar_sel = static_cast<size_t>(tpAICreation);
                 ensure_web_model_view_ready(m_ai_creation_view);
             }
+#ifdef CREALITY_LOCAL_AGENT
+            else if (panel == m_local_agent_workspace)
+                topbar_sel = static_cast<size_t>(tpAICreation);
+#endif
             else if (panel == m_webview)
                 topbar_sel = static_cast<size_t>(tpHome);
             m_topbar->SetSelection(topbar_sel);
@@ -1570,12 +1577,21 @@ void MainFrame::init_tabpanel() {
     m_tabpanel->AddPage(m_printer_mgr_view, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
     m_printer_mgr_view->Hide();
 
-    // Append the page so existing notebook indices stay stable. The topbar uses its window ID.
+    // Append the existing AI slot without shifting stock notebook indices.
+#ifdef CREALITY_LOCAL_AGENT
+    // Local mode uses the bundled, native-bridged workspace instead of the cloud AI page.
+    m_local_agent_workspace = new MCPChatPanel(m_tabpanel);
+    m_local_agent_workspace->SetId(tpAICreation);
+    m_tabpanel->AddPage(m_local_agent_workspace, _L("Local AI"),
+                        "tab_ai_creation_active", "tab_ai_creation", false);
+    m_local_agent_workspace->Hide();
+#else
     m_ai_creation_view = new WebModelLibraryView(m_tabpanel);
     m_ai_creation_view->SetId(tpAICreation);
     m_ai_creation_view->SetStartPage(wxString::FromUTF8(get_ai_creation_webaddress()));
     m_tabpanel->AddPage(m_ai_creation_view, _L("AI Creation"), "tab_ai_creation_active", "tab_ai_creation", false);
     m_ai_creation_view->Hide();
+#endif
     if(m_plater) {
         m_plater->create_send_to_printer_dlg();  // BBS : pre create the send dialog on program startup
     }
@@ -4821,9 +4837,14 @@ void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
         //size_t new_selection = tab == (size_t)(-1) ? m_last_selected_tab : (m_layout == ESettingsLayout::Dlg && tab != 0) ? tab - 1 : tab;
         size_t new_selection = tab == (size_t)(-1) ? m_last_selected_tab : tab;
         if (tab == tpAICreation) {
-            if (!m_ai_creation_view)
+#ifdef CREALITY_LOCAL_AGENT
+            wxWindow* ai_workspace = m_local_agent_workspace;
+#else
+            wxWindow* ai_workspace = m_ai_creation_view;
+#endif
+            if (!ai_workspace)
                 return;
-            const int page_idx = m_tabpanel->FindPage(m_ai_creation_view);
+            const int page_idx = m_tabpanel->FindPage(ai_workspace);
             if (page_idx == wxNOT_FOUND)
                 return;
             new_selection = static_cast<size_t>(page_idx);
@@ -4833,7 +4854,13 @@ void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
         {
             m_tabpanel->SetSelection(new_selection);
             if(this->topbar())
-                this->topbar()->SetSelection(m_tabpanel->GetCurrentPage() == m_ai_creation_view ? tpAICreation : new_selection);
+                this->topbar()->SetSelection(
+#ifdef CREALITY_LOCAL_AGENT
+                    m_tabpanel->GetCurrentPage() == m_local_agent_workspace ? tpAICreation : new_selection
+#else
+                    m_tabpanel->GetCurrentPage() == m_ai_creation_view ? tpAICreation : new_selection
+#endif
+                );
         }
 #ifdef _MSW_DARK_MODE
         /*if (wxGetApp().tabs_as_menu()) {

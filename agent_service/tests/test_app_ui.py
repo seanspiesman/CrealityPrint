@@ -48,11 +48,14 @@ class Node {
   set textContent(v) { this._text=String(v); this.children=[]; this.options=[]; }
   get textContent() { return this._text || this.children.map(x=>x.textContent).join(''); }
   fire(type, event={}) { for (const fn of this.listeners[type]||[]) fn({preventDefault(){},currentTarget:this,target:this,...event}); }
+  reset() { for (const field of Object.values(this.elements)) field.value=''; }
   remove() { if (this.parentNode) this.parentNode.children=this.parentNode.children.filter(x=>x!==this); }
 }
 const ids = [...fs.readFileSync(process.argv[2], 'utf8').matchAll(/id="([^"]+)"/g)].map(x=>x[1]);
 const nodes = Object.fromEntries(ids.map(id=>[id,new Node()]));
 nodes['cfs-printer']=new Node('select');
+nodes['conversation-history']=new Node('select');
+nodes['printer-id']=new Node('select');
 for (const id of ['model-form','policy-form','printer-form','reference-form','cfs-form','profile-form','job-form','chat-form']) {
   nodes[id].elements = new Proxy({}, {get: (o,k) => o[k] || (o[k]=new Node('input'))});
 }
@@ -72,11 +75,39 @@ window.handleSlicerEvent({command:'local_agent_result',data:{request_id:initial.
   printers:[{id:'printer-1',name:'Printer 1',cfs_slots:[{slot_id:'A1',material:'PLA',color:'Blue',remaining_grams:120,verified:true}]}],
   profiles:[],alerts:[{id:1,acknowledged:true,title:'old alert'}],
   questions:[{id:'question-1',job_id:null,question:'<svg onload=bad()> Which material?',status:'open'}],
-  conversations:[{id:'conversation-1',created:1}],policy:{max_hours:4},model:{}}}});
+  conversations:[{id:'conversation-1',created:1},{id:'conversation-2',created:2}],policy:{max_hours:4},model:{}}}});
 const historyRequest=sent.find(x=>x.data.action==='get_conversation');
 if (!historyRequest || historyRequest.data.payload.conversation_id!=='conversation-1') throw Error('history selection was not loaded');
-window.handleSlicerEvent({command:'local_agent_result',data:{request_id:historyRequest.data.request_id,ok:true,result:{id:'conversation-1',messages:[{role:'assistant',content:'<b>untrusted</b>'}]}}});
+nodes['conversation-history'].value='conversation-2';
+nodes['conversation-history'].fire('change');
+const historySwitch=sent.filter(x=>x.data.action==='get_conversation').at(-1);
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:historyRequest.data.request_id,ok:false,error:'stale conversation failure'}});
+if (nodes['conversation-list'].textContent.includes('stale conversation') ||
+    nodes.toast.textContent.includes('stale conversation failure')) throw Error('late history response affected the selected conversation');
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:historySwitch.data.request_id,ok:true,result:{id:'conversation-2',messages:[{role:'assistant',content:'<b>untrusted</b>'}]}}});
 if (!nodes['conversation-list'].textContent.includes('<b>untrusted</b>')) throw Error('conversation history message was lost');
+nodes['chat-form'].elements.message.value='message for conversation 2';
+nodes['chat-form'].fire('submit');
+const delayedChat=sent.filter(x=>x.data.action==='chat').at(-1);
+if (delayedChat.data.payload.conversation_id!=='conversation-2') throw Error('chat did not capture its conversation');
+nodes['conversation-history'].value='conversation-1';
+nodes['conversation-history'].fire('change');
+const chatStateCount=sent.filter(x=>x.data.action==='state').length;
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:delayedChat.data.request_id,ok:true,
+  result:{conversation_id:'conversation-2',messages:[]}}});
+if (sent.filter(x=>x.data.action==='state').length!==chatStateCount) throw Error('late chat response refreshed or changed a newer history selection');
+nodes['new-conversation'].fire('click');
+const delayedNew=sent.filter(x=>x.data.action==='new_conversation').at(-1);
+nodes['conversation-history'].value='conversation-2';
+nodes['conversation-history'].fire('change');
+const newStateCount=sent.filter(x=>x.data.action==='state').length;
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:delayedNew.data.request_id,ok:true,
+  result:{id:'conversation-3'}}});
+if (sent.filter(x=>x.data.action==='state').length!==newStateCount) throw Error('late new-conversation response displaced a newer history selection');
+nodes['chat-form'].elements.message.value='message remains in conversation 2';
+nodes['chat-form'].fire('submit');
+if (sent.filter(x=>x.data.action==='chat').at(-1).data.payload.conversation_id!=='conversation-2')
+  throw Error('stale conversation response changed the active conversation');
 function walk(n,out=[]) { out.push(n); for (const c of n.children) walk(c,out); return out; }
 const nodesFound=walk(nodes['jobs-list']);
 const resume=nodesFound.find(n=>n.tagName==='button' && n.textContent.includes('Resume'));
@@ -137,6 +168,14 @@ const cfsSave=sent.find(x=>x.data.action==='save_cfs_inventory');
 if (!cfsSave || cfsSave.data.payload.printer_id!=='printer-2' || cfsSave.data.payload.slots.length!==2 ||
     cfsSave.data.payload.slots[0].material!=='PETG' || cfsSave.data.payload.slots[1].verified!==true) throw Error('CFS rows did not serialize to the service contract');
 if (nodes['cfs-slots'].textContent.includes('Approve budget')) throw Error('CFS form exposes unrelated approval actions');
+cfsRows()[0].slotFields.color.value='newer unsaved color';
+cfsRows()[0].slotFields.color.fire('input');
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:cfsSave.data.request_id,ok:true,result:{}}});
+const cfsResponseRefresh=sent.filter(x=>x.data.action==='state').at(-1);
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:cfsResponseRefresh.data.request_id,ok:true,result:{
+  jobs:[],printers:[{id:'printer-1',name:'Printer 1',cfs_slots:[]},{id:'printer-2',name:'Printer 2',cfs_slots:cfsSave.data.payload.slots}],
+  profiles:[],alerts:[],questions:[],conversations:[],policy:{},model:{}}}});
+if (cfsRows()[0].slotFields.color.value!=='newer unsaved color') throw Error('older CFS save response cleared newer unsaved edits');
 nodes['model-form'].dataset.dirty='true';
 nodes['model-form'].elements.base_url.value='http://localhost:1234';
 nodes['model-form'].entriesMap={base_url:'http://localhost:1234',model:'local-model',api_key:''};
@@ -153,6 +192,17 @@ const printerRequest=sent.find(x=>x.data.action==='enroll_printer');
 if (!printerRequest || printerRequest.data.payload.printer_id!=='printer-1' ||
     printerRequest.data.payload.camera_url!=='http://camera.local/stream' ||
     printerRequest.data.payload.camera_association_confirmed!==false) throw Error('printer enrollment form payload incomplete');
+nodes['printer-id'].value='printer-2';
+nodes['printer-form'].fire('change',{target:nodes['printer-id']});
+nodes['printer-form'].elements.name.value='newer unsaved printer name';
+nodes['printer-form'].fire('input',{target:nodes['printer-form'].elements.name});
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:printerRequest.data.request_id,ok:true,result:{}}});
+const printerResponseRefresh=sent.filter(x=>x.data.action==='state').at(-1);
+window.handleSlicerEvent({command:'local_agent_result',data:{request_id:printerResponseRefresh.data.request_id,ok:true,result:{
+  jobs:[],printers:[{id:'printer-1',name:'Saved old update',cfs_slots:[]}],
+  profiles:[],alerts:[],questions:[],conversations:[],policy:{},model:{}}}});
+if (nodes['printer-id'].value!=='printer-1' ||
+    nodes['printer-form'].elements.name.value!=='newer unsaved printer name') throw Error('late printer save response cleared or replaced newer edits');
 nodes['reference-form'].entriesMap={printer_id:'printer-1',left:'3',top:'4',right:'80',bottom:'90'};
 nodes['reference-form'].elements.bed_clear_confirmed.checked=true;
 nodes['reference-form'].fire('submit');

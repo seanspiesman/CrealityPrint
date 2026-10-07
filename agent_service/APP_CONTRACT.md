@@ -6,11 +6,11 @@ The installed service remains the only durable job engine. Native UI talks to lo
 
 Load only bundled `resources/web/local_agent/index.html`. JavaScript sends `{command:"local_agent_request",data:{request_id,action,payload,idempotency_key}}` through the existing native message handler. C++ whitelists actions and sends GET `/v1/operator/state` for `state`, otherwise POST `/v1/operator/actions` with `{action,payload,idempotency_key}`. Return `{command:"local_agent_result",data:{request_id,ok,result,error}}` using the existing JS command mechanism. Preserve authorization natively. Never interpret a model/tool result as a native operator request.
 
-State: `{jobs,printers,profiles,policy,model,alerts,conversations}`. Printer enrollment fields are owner-visible; secret fields are omitted. Model: `{base_url,model,api_key_set}`. Conversations include messages as structured text/tool records; no rendered HTML or camera bytes.
+State: `{jobs,printers,profiles,policy,model,alerts,conversations,questions}`. Printer enrollment fields are owner-visible; secret fields are omitted. Model: `{base_url,model,api_key_set}`. Conversations include messages as structured text/tool records; no rendered HTML or camera bytes.
 
-Actions: `create_job`, `select_model`, `prepare_job`, `queue_job`, `start_job`, `pause_job`, `cancel_job`, `resume_job`, `approve_resume`, `approve_budget`, `save_model`, `save_policy`, `enroll_printer`, `save_profile`, `enroll_reference`, `save_cfs_inventory`, `probe_printer`, `open_project`, `chat`, `new_conversation`, `get_conversation`, `acknowledge_alert`.
+Actions: `create_job`, `select_model`, `prepare_job`, `queue_job`, `start_job`, `pause_job`, `cancel_job`, `resume_job`, `approve_resume`, `approve_budget`, `save_model`, `save_policy`, `enroll_printer`, `save_profile`, `enroll_reference`, `save_cfs_inventory`, `probe_printer`, `open_project`, `chat`, `new_conversation`, `get_conversation`, `acknowledge_alert`, `answer_question`.
 
-Existing job actions use existing typed payloads plus `job_id` where required. `approve_resume`: `{job_id}`. `approve_budget`: `{job_id}` bound to current G-code hash and estimates. `chat`: `{conversation_id?,message}` returns immediately; poll state. `save_model`: `{base_url,model,api_key?}` local/LAN endpoint only. `save_policy`: `{max_hours,max_grams,monitoring_loss_seconds,pause_on_monitoring_loss}` confirms both policies. `enroll_printer`: `{printer_id,...operator-editable connection/nozzle/camera/material fields}`; no control/vision/auto-start qualification flags accepted. `save_profile`: typed Profile record. `enroll_reference`: `{printer_id,bed_clear_confirmed,roi}`; camera image never returned. `save_cfs_inventory`: `{printer_id,slots:[{slot_id,material,color,remaining_grams,verified}]}`. `probe_printer`: `{printer_id}` read-only status. `open_project`: `{job_id}` returns local path/hash for native isolated inspection; do not load into owner's current Plater.
+Existing job actions use existing typed payloads plus `job_id` where required. `approve_resume`: `{job_id}`. `approve_budget`: `{job_id}` bound to current G-code hash and estimates. `chat`: `{conversation_id?,message}` returns immediately; poll state. `save_model`: `{base_url,model,api_key?}` loopback/private LAN or explicitly configured owner Tailscale endpoint only. `save_policy`: `{max_hours,max_grams,monitoring_loss_seconds,pause_on_monitoring_loss}` confirms both policies. `enroll_printer`: `{printer_id,...operator-editable connection/nozzle/camera/material fields}`; no control/vision/auto-start qualification flags accepted. `save_profile`: typed Profile record. `enroll_reference`: `{printer_id,bed_clear_confirmed,roi}`; camera image never returned. `save_cfs_inventory`: `{printer_id,slots:[{slot_id,material,color,remaining_grams,verified}]}`. `probe_printer`: `{printer_id}` read-only status. `open_project`: `{job_id}` returns local path/hash for native isolated inspection; do not load into owner's current Plater.
 
 ## GUI helper
 
@@ -26,3 +26,19 @@ Owner state includes `questions: [{id,job_id,question,status,answer,created}]`.
 Agents can use `request_owner_input` and `list_questions` (API GET/POST `/v1/questions`).
 Only the local owner action `answer_question` accepts `{question_id,answer}`.
 Answers persist across restart and do not grant resume, budget, or printer qualification.
+
+## Native settings normalization
+
+`--local-agent-normalize <request.json>` runs before GUI initialization in the
+custom build. Version 1 requests contain one to four absolute JSON `files` and a
+fresh absolute `output`. The network-denying subprocess returns per-file SHA-256,
+native option type/serialization/vector cardinality, and an accounting entry for
+every raw key. Unknown or dropped settings hold preparation. Native parsing starts
+with an empty configuration; it never fills defaults for comparison.
+
+The service compares the explicit profile values with values extracted from the
+exported 3MF. Profile conflicts, duplicate keys, non-finite values, changed values,
+and missing settings fail. Only reviewed metadata, disabled obsolete adaptive
+layer height, documented wall-order migration, and the native singleton-to-paired
+Normal/Silent machine motion-limit representation are accepted. Native export
+assertions do not replace Python geometry, settings and artifact-hash checks.

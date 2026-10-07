@@ -576,6 +576,8 @@ else ()
             set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/CrealityPrint.app/Contents/Resources")
         endif()
         set(MACOSX_BUNDLE_ICON_FILE Icon.icns)
+        set_target_properties(${PROJECT_DLL} PROPERTIES
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${CREALITYPRINT_BUNDLE_IDENTIFIER}")
         set(MACOSX_BUNDLE_NAME "CrealityPrint")
         set(MACOSX_BUNDLE_DISPLAY_NAME "CrealityPrint")
         set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${CREALITYPRINT_VERSION})

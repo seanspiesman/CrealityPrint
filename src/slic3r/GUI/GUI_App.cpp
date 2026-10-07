@@ -137,6 +137,9 @@
 #include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "LocalAgentProjectHelper.hpp"
+#if defined(CREALITY_LOCAL_AGENT) && defined(__APPLE__)
+#include "LocalAgentTranslations.hpp"
+#endif
 #include "GLCanvas3D.hpp"
 #include "AnalyticsDataUploadManager.hpp"
 
@@ -2175,8 +2178,10 @@ void GUI_App::post_init()
     m_open_method = "double_click";
     bool switch_to_3d = false;
     if (!this->init_params->input_files.empty()) {
+#ifndef CREALITY_LOCAL_AGENT
         bool onlyDefault = preset_bundle->printers.only_default_printers();
         if (onlyDefault) return;
+#endif
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", init with input files, size %1%, input_gcode %2%")
             %this->init_params->input_files.size() %this->init_params->input_gcode;
@@ -2316,6 +2321,14 @@ void GUI_App::post_init()
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished rendering a first frame for test";
             }
         }
+#ifdef CREALITY_LOCAL_AGENT
+        if (!is_local_agent_helper()) {
+            const size_t initial_tab = init_params->input_files.empty()
+                ? size_t(MainFrame::tpAICreation) : size_t(MainFrame::tp3DEditor);
+            mainframe->select_tab(initial_tab);
+            mainframe->m_topbar->SetSelection(initial_tab);
+        } else
+#endif
         if (app_config->get("default_page") == "1")
         {
             // First launch: keep the home page in front so the home-page SPA
@@ -4598,8 +4611,15 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
                 dlg.IsCheckBoxChecked() ? Slic3r::Http::tls_system_cert_store() : "");
         }
     }
-    if (!is_local_agent_helper())
+    if (!is_local_agent_helper()) {
         on_init_custom_config();
+#ifdef CREALITY_LOCAL_AGENT
+        // This build enrolls printers in its local service workspace. Skip the
+        // stock setup tour without changing privacy or account consent state.
+        app_config->set("is_first_install", "1");
+        app_config->set("firstguide", "finish", "1");
+#endif
+    }
     // !!! Initialization of UI settings as a language, application color mode, fonts... have to be done before first UI action.
     // Like here, before the show InfoDialog in check_older_app_config()
 
@@ -8887,7 +8907,15 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 nlohmann::json dataJson;
                 nlohmann::json commandJson;
                 bool           onlyDefault = preset_bundle->printers.only_default_printers();
-                if (res == "1") {
+#ifdef CREALITY_LOCAL_AGENT
+                // Local enrollment lives in the guarded service workspace. The
+                // stock Cloud/LAN onboarding disables navigation until a device
+                // is added, preventing a fresh local app from reaching it.
+                const bool local_enrollment = true;
+#else
+                const bool local_enrollment = false;
+#endif
+                if (res == "1" || local_enrollment) {
                     dataJson["deviceAddEnd"] = "1";
                     commandJson["command"]   = "get_is_first_install";
                     commandJson["data"]      = dataJson;
@@ -12413,7 +12441,12 @@ bool GUI_App::load_language(wxString language, bool initial)
     //FIXME wxWidgets cause havoc if the current locale is deleted. We just forget it causing memory leaks for now.
     m_wxLocale.release();
     m_wxLocale = Slic3r::make_unique<wxLocale>();
+#if defined(CREALITY_LOCAL_AGENT) && defined(__APPLE__)
+    m_wxLocale->Init(language_info->Language, 0);
+    wxTranslations::Get()->SetLoader(new LocalAgentTranslations(from_u8(localization_dir())));
+#else
     m_wxLocale->Init(language_info->Language);
+#endif
     // Override language at the active wxTranslations class (which is stored in the active m_wxLocale)
     // to load possibly different dictionary, for example, load Czech dictionary for Slovak language.
     wxTranslations::Get()->SetLanguage(language_dict);

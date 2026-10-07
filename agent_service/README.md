@@ -26,7 +26,21 @@ DEPS_ENV_DIR=/absolute/path/to/dependency-prefix agent_service/scripts/build_loc
 agent_service/scripts/install_local_agent_app.sh '/absolute/path/Creality Print Local Agent.app'
 ```
 
-The installer refuses existing destinations and defaults to `~/Applications/Creality Print Local Agent.app`. The custom build uses a separate data version. Configure `gui_helper_binary` and `slicer_binary` in the private service configuration to the separately built executable after native acceptance. See [APP_CONTRACT.md](APP_CONTRACT.md) for the finite owner interface and helper manifests. macOS notifications report accepted delivery requests; permission and actual display require live verification. Durable in-app alert history remains available independently of Notification Center.
+The current separately built app was compiled and packaged on the owner's macOS 26 machine. Its bundle metadata requests macOS 11.3, but that metadata is not evidence of compatibility with older macOS versions: prebuilt x264 assembly linked into this build requires macOS 26. Older-version support needs separate dependency qualification.
+
+The installer refuses existing destinations and defaults to `~/Applications/Creality Print Local Agent.app`. The custom build uses a separate data version. Configure `gui_helper_binary` and `slicer_binary` in the private service configuration to the separately built executable after native acceptance. To reproduce the offline native export/re-slice check without starting the service or configuring a printer, pass a new output directory and local STL/profile paths:
+
+```sh
+.venv/bin/python scripts/verify_local_agent_app.py \
+  --binary "/absolute/path/Creality Print Local Agent.app/Contents/MacOS/CrealityPrint" \
+  --model /absolute/path/model.stl \
+  --machine /absolute/path/machine.json \
+  --process /absolute/path/process.json \
+  --filament /absolute/path/filament.json \
+  --output /absolute/path/new-verification-output
+```
+
+The output directory must not exist. On macOS both helper and CLI re-slice processes run under a network-denying sandbox. The result records source/profile/project/G-code hashes, independently verified geometry/settings, slicer estimates and G-code motion evidence; it never establishes hardware qualification. See [APP_CONTRACT.md](APP_CONTRACT.md) for the finite owner interface and helper manifests. macOS notifications report accepted delivery requests; permission and actual display require live verification. Durable in-app alert history remains available independently of Notification Center.
 
 ## Run
 

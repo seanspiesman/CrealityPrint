@@ -44,4 +44,8 @@ ditto "$SOURCE" "$STAGE"
 codesign --verify --deep --strict "$STAGE"
 mv "$STAGE" "$DESTINATION_ABS"
 trap - EXIT INT TERM
+if ! /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$DESTINATION_ABS"; then
+    echo "Error: installed app could not be registered with Launch Services: $DESTINATION_ABS" >&2
+    exit 1
+fi
 echo "Installed separate app: $DESTINATION_ABS"

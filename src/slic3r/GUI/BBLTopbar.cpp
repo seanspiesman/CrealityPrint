@@ -1054,7 +1054,11 @@ void BBLTopbar::Init(wxFrame* parent)
     m_tabs_leading_spacer_item = AddStretchSpacer(1);
     //CX
     ButtonsCtrl* pCtr = new ButtonsCtrl(this);
+#ifdef CREALITY_LOCAL_AGENT
+    pCtr->InsertPage(MainFrame::tpAICreation, _L("Local AI"), false, "tab_ai_creation");
+#else
     pCtr->InsertPage(MainFrame::tpAICreation, _L("AI Creation"), false, "tab_ai_creation");
+#endif
     pCtr->InsertPage(MainFrame::tpOnlineModel, _L("Online Models"), 0);
     pCtr->InsertPage(MainFrame::tp3DEditor, _L("Prepare"), 0);
     pCtr->InsertPage(MainFrame::tpPreview, _L("Preview"), 0);

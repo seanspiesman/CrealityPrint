@@ -113,7 +113,10 @@ async def slice_model(
     except OSError:
         raise SliceError("Output directory is unavailable") from None
 
-    argv: list[str] = [str(binary), *(["--cli"] if cli_mode else []), "--slice", "0", "--outputdir", str(output_dir)]
+    # The custom CLI keeps project G-code in its scratch archive unless export
+    # is explicitly requested. Stock older binaries do not expose this switch.
+    argv: list[str] = [str(binary), *(["--cli", "--need-gcode-file"] if cli_mode else []),
+                       "--slice", "0", "--outputdir", str(output_dir)]
     if setting_paths:
         argv.extend(("--load-settings", ";".join(map(str, setting_paths))))
     if filament_paths:

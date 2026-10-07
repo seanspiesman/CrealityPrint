@@ -4,6 +4,10 @@ set(_srcdir ${CMAKE_CURRENT_LIST_DIR}/mpfr)
 set(patch_command "")
 set(_mpfr_cppflags "")
 set(_mpfr_autoreconf_cmd "")
+set(_mpfr_download_timestamp_arg "")
+if (NOT CMAKE_VERSION VERSION_LESS 3.24)
+    set(_mpfr_download_timestamp_arg DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+endif()
 if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "loongarch")
     # Apply patch if possible; tolerate failure and rely on CPPFLAGS workaround
     set(patch_command git init && ${PATCH_CMD} ${CMAKE_CURRENT_LIST_DIR}/0001-loongarch64-build.patch || true)
@@ -39,7 +43,7 @@ else ()
         URL https://www.mpfr.org/mpfr-4.2.2/mpfr-4.2.2.tar.bz2
             https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.bz2
         URL_HASH SHA256=9ad62c7dc910303cd384ff8f1f4767a655124980bb6d8650fe62c815a231bb7b
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        ${_mpfr_download_timestamp_arg}
         DOWNLOAD_DIR ${DEP_DOWNLOAD_DIR}/MPFR
         PATCH_COMMAND ${patch_command}
         BUILD_IN_SOURCE ON

@@ -2553,15 +2553,17 @@ void Sidebar::update_all_preset_comboboxes()
             connection_btn->Show();
         //   ams_btn->Hide();
         auto     print_btn_type = MainFrame::PrintSelectType::eSendToLocalNetPrinter;
-        wxString url = cfg.opt_string("print_host_webui").empty() ? cfg.opt_string("print_host") : cfg.opt_string("print_host_webui");
+        const wxString webui_url = cfg.has("print_host_webui") ? from_u8(cfg.opt_string("print_host_webui")) : wxString();
+        const wxString host_url = cfg.has("print_host") ? from_u8(cfg.opt_string("print_host")) : wxString();
+        wxString url = webui_url.empty() ? host_url : webui_url;
         wxString apikey;
         if (url.empty())
             url = wxString::Format("file://%s/web/orca/missing_connection.html", from_u8(resources_dir()));
         else {
             if (!url.Lower().starts_with("http"))
                 url = wxString::Format("http://%s", url);
-            const auto host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
-            if (cfg.has("printhost_apikey") && (host_type != htSimplyPrint))
+            const auto *host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
+            if (cfg.has("printhost_apikey") && host_type != nullptr && host_type->value != htSimplyPrint)
                 apikey = cfg.opt_string("printhost_apikey");
             print_btn_type = preset_bundle.is_bbl_vendor() ? MainFrame::PrintSelectType::ePrintPlate :
                                                              MainFrame::PrintSelectType::eSendToLocalNetPrinter;
@@ -2572,7 +2574,8 @@ void Sidebar::update_all_preset_comboboxes()
         p_mainframe->set_print_button_to_default(print_btn_type);
     }
 
-    if (cfg.opt_bool("pellet_modded_printer")) {
+    const bool pellet_modded_printer = cfg.has("pellet_modded_printer") && cfg.opt_bool("pellet_modded_printer");
+    if (pellet_modded_printer) {
         p->m_staticText_filament_settings->SetLabel(_L("Pellets"));
         p->m_filament_icon->SetBitmap_("pellets");
     } else {
@@ -2581,7 +2584,8 @@ void Sidebar::update_all_preset_comboboxes()
     }
 
     if (nullptr != m_bed_type_list) {
-        if (is_bbl_vendor || cfg.opt_bool("support_multi_bed_types")) {
+        const bool supports_multiple_bed_types = cfg.has("support_multi_bed_types") && cfg.opt_bool("support_multi_bed_types");
+        if (is_bbl_vendor || supports_multiple_bed_types) {
             m_bed_type_list->Enable();
             auto str_bed_type = wxGetApp().app_config->get_printer_setting(wxGetApp().preset_bundle->printers.get_selected_preset_name(),
                                                                            "curr_bed_type");
@@ -14474,7 +14478,9 @@ void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
     } else {
         if (new_sel == MainFrame::tpMonitor && wxGetApp().preset_bundle != nullptr) {
             auto     cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-            wxString url = cfg.opt_string("print_host_webui").empty() ? cfg.opt_string("print_host") : cfg.opt_string("print_host_webui");
+            const wxString webui_url = cfg.has("print_host_webui") ? from_u8(cfg.opt_string("print_host_webui")) : wxString();
+            const wxString host_url = cfg.has("print_host") ? from_u8(cfg.opt_string("print_host")) : wxString();
+            const wxString url = webui_url.empty() ? host_url : webui_url;
             if (main_frame->m_printer_view && url.empty()) {
                 // It's missing_connection page, reload so that we can replay the gif image
                 main_frame->m_printer_view->reload();

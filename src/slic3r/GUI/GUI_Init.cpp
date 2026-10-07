@@ -6,6 +6,9 @@
 
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#ifdef CREALITY_LOCAL_AGENT
+#include "slic3r/GUI/LocalAgentProjectHelper.hpp"
+#endif
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/InstanceCheck.hpp"
 #include "slic3r/GUI/format.hpp"
@@ -73,6 +76,11 @@ static boost::filesystem::path macos_crash_log_dir()
 int GUI_Run(int argc, char **argv)
 {
 #ifdef CREALITY_LOCAL_AGENT
+    // Native config normalization is intentionally headless: it must not create
+    // GUI state, private helper profiles, or pass through wxEntry.
+    if (argc > 1 && argv && argv[1] && std::string(argv[1]) == "--local-agent-normalize")
+        return run_local_agent_normalize_cli(argc, argv);
+
     // Detect helper switches before the normal CLI parser. The service passes
     // --datadir <per-job-private-dir>; no other ordinary GUI flags are accepted
     // with helper mode. This happens before GUI_App construction and IPC setup.

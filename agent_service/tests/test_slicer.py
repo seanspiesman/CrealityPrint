@@ -160,3 +160,16 @@ async def test_custom_app_uses_explicit_headless_mode_for_saved_project(tmp_path
         "(out/'plate_1.gcode').write_text('; saved project slice')")
     result = await slice_model(binary, _model(tmp_path, '.3mf'), tmp_path / 'slice', [], [], cli_mode=True)
     assert Path(result['gcode_paths'][0]).is_file()
+
+
+async def test_custom_project_cli_explicitly_exports_gcode(tmp_path: Path) -> None:
+    binary = _fake_cli(tmp_path,
+        "import pathlib,sys\n"
+        "out=pathlib.Path(sys.argv[sys.argv.index('--outputdir')+1])\n"
+        "if '--cli' in sys.argv and '--need-gcode-file' in sys.argv:\n"
+        " (out/'plate_1.gcode').write_text('G1 X1 E1')")
+    project = _model(tmp_path, '.3mf')
+    result = await slice_model(binary, project, tmp_path / 'explicit', [], [], cli_mode=True)
+    assert Path(result['gcode_paths'][0]).read_text() == 'G1 X1 E1'
+    with pytest.raises(SliceError, match='no valid G-code'):
+        await slice_model(binary, project, tmp_path / 'implicit', [], [])
