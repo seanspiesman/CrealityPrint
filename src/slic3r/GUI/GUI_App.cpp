@@ -136,6 +136,7 @@
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "LocalAgentProjectHelper.hpp"
 #include "GLCanvas3D.hpp"
 #include "AnalyticsDataUploadManager.hpp"
 
@@ -885,6 +886,8 @@ VersionInfo::VersionInfo()
 
 void GUI_App::schedule_software_launch_analytics()
 {
+    if (is_local_agent_helper())
+        return;
     if (m_is_closing || m_app_launch_initialized)
         return;
     if (!is_privacy_checked())
@@ -2148,13 +2151,13 @@ void GUI_App::post_init()
     if (! this->initialized())
         throw Slic3r::RuntimeError("Calling post_init() while not yet initialized");
 
-    if (!m_enable_test && is_editor() && app_config != nullptr && !m_satisfaction_survey_manager) {
+    if (!is_local_agent_helper() && !m_enable_test && is_editor() && app_config != nullptr && !m_satisfaction_survey_manager) {
         m_satisfaction_survey_manager = std::make_unique<SatisfactionSurveyManager>(
             *app_config, CxBuildInfo::getVersion(), CxBuildInfo::getBuildType());
         install_satisfaction_survey_event_filter();
     }
 
-    if (app_config->get("sync_user_preset") == "true") {
+    if (!is_local_agent_helper() && app_config->get("sync_user_preset") == "true") {
         // BBS loading user preset
         // Always async, not such startup step
         // BOOST_LOG_TRIVIAL(info) << "Loading user presets...";
@@ -2401,7 +2404,7 @@ void GUI_App::post_init()
     }
 #endif
 
-    if (app_config->get("stealth_mode") == "false")
+    if (!is_local_agent_helper() && app_config->get("stealth_mode") == "false")
         hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
@@ -2598,15 +2601,16 @@ IMPLEMENT_APP(GUI_App)
 
 //BBS: remove GCodeViewer as seperate APP logic
 //GUI_App::GUI_App(EAppMode mode)
-GUI_App::GUI_App(bool enable_test /*= false*/)
+GUI_App::GUI_App(bool enable_test /*= false*/, bool local_agent_helper /*= false*/)
     : wxApp()
     //, m_app_mode(mode)
     , m_app_mode(EAppMode::Editor)
+    , m_local_agent_helper(local_agent_helper)
     , m_em_unit(10)
     , m_imgui(new ImGuiWrapper())
 	, m_removable_drive_manager(std::make_unique<RemovableDriveManager>())
     , m_downloader(std::make_unique<Downloader>())
-	, m_other_instance_message_handler(std::make_unique<OtherInstanceMessageHandler>())
+    , m_other_instance_message_handler(std::make_unique<OtherInstanceMessageHandler>())
     , m_enable_test(enable_test)
 {
 	//app config initializes early becasuse it is used in instance checking in CrealityPrint.cpp
@@ -2619,8 +2623,20 @@ GUI_App::GUI_App(bool enable_test /*= false*/)
     initDevelopParams();
     reset_to_active();
 #ifdef __APPLE__
-    Slic3r::GUI::register_receive_mac([](const std::string& m) { wxGetApp().on_interinstance_message(m); });
+    if (!m_local_agent_helper)
+        Slic3r::GUI::register_receive_mac([](const std::string& m) { wxGetApp().on_interinstance_message(m); });
 #endif
+}
+
+bool GUI_App::is_local_agent_helper() const
+{
+    return m_local_agent_helper || (init_params != nullptr && init_params->local_agent_helper);
+}
+
+int GUI_App::OnRun()
+{
+    const int result = wxApp::OnRun();
+    return is_local_agent_helper() ? m_local_agent_helper_exit_code : result;
 }
 
 void GUI_App::shutdown()
@@ -4359,7 +4375,7 @@ bool GUI_App::OnInit()
         //test code
          //int* p = nullptr;
          //*p = 0;
-         if (app_config->get("sync_user_preset") == "true") {
+         if (!is_local_agent_helper() && app_config->get("sync_user_preset") == "true") {
             start_sync_user_preset();
          }
          #ifdef _WIN32
@@ -4379,7 +4395,8 @@ int GUI_App::OnExit()
     BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " start";
 
     // Clear resumable state on exit: remove any *.part files under the update cache root.
-    AppUpdater::getInstance().cleanup_partial_downloads(CREALITYPRINT_VERSION);
+    if (!is_local_agent_helper())
+        AppUpdater::getInstance().cleanup_partial_downloads(CREALITYPRINT_VERSION);
 
     //stop_sync_user_preset();
     SyncUserPresets::getInstance().shutdown();
@@ -4482,7 +4499,8 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     wxInitAllImageHandlers();
 
     // If the previous run exited unexpectedly, *.part may remain. Clear them on startup as well.
-    AppUpdater::getInstance().cleanup_partial_downloads(CREALITYPRINT_VERSION);
+    if (!is_local_agent_helper())
+        AppUpdater::getInstance().cleanup_partial_downloads(CREALITYPRINT_VERSION);
 #ifdef NDEBUG
     wxImage::SetDefaultLoadFlags(0); // ignore waring in release build
 #endif
@@ -4561,7 +4579,7 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
 //    wxSystemOptions::SetOption("msw.notebook.themed-background", 0);
 
 //     Slic3r::debugf "wxWidgets version %s, Wx version %s\n", wxVERSION_STRING, wxVERSION;
-    if (is_editor()) {
+    if (is_editor() && !is_local_agent_helper()) {
         std::string msg = Slic3r::Http::tls_global_init();
         std::string ssl_cert_store = app_config->get("tls_accepted_cert_store_location");
         bool ssl_accept = app_config->get("tls_cert_store_accepted") == "yes" && ssl_cert_store == Slic3r::Http::tls_system_cert_store();
@@ -4580,7 +4598,8 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
                 dlg.IsCheckBoxChecked() ? Slic3r::Http::tls_system_cert_store() : "");
         }
     }
-    on_init_custom_config();
+    if (!is_local_agent_helper())
+        on_init_custom_config();
     // !!! Initialization of UI settings as a language, application color mode, fonts... have to be done before first UI action.
     // Like here, before the show InfoDialog in check_older_app_config()
 
@@ -4675,7 +4694,7 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     }
 
     SplashScreen * scrn = nullptr;
-    if (app_config->get("show_splash_screen") == "true") {
+    if (!is_local_agent_helper() && app_config->get("show_splash_screen") == "true") {
         // make a bitmap with dark grey banner on the left side
         //BBS make BBL splash screen bitmap
         wxBitmap bmp = SplashScreen::MakeBitmap();
@@ -4755,10 +4774,12 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
         //    associate_files(L"gcode");
 //#endif // __WXMSW__
 
-        preset_updater = new PresetUpdater();
+        if (!is_local_agent_helper())
+            preset_updater = new PresetUpdater();
 
         // start load profile family after preset updater finished
-        ProfileFamilyLoader::init();
+        if (!is_local_agent_helper())
+            ProfileFamilyLoader::init();
 
 #if !AUTO_CONVERT_3MF
 
@@ -4987,8 +5008,10 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     std::map<std::string, std::string> extra_headers = get_extra_header();
     Slic3r::Http::set_extra_headers(extra_headers);
 
-    copy_network_if_available();
-    on_init_network();
+    if (!is_local_agent_helper()) {
+        copy_network_if_available();
+        on_init_network();
+    }
 
     if (m_agent && m_agent->is_user_login()) {
         enable_user_preset_folder(true);
@@ -5141,7 +5164,9 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     });
     //UITour::Instance();
     // hide settings tabs after first Layout
-    if (this->init_params->input_files.empty()) {
+    if (is_local_agent_helper()) {
+        mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+    } else if (this->init_params->input_files.empty()) {
         mainframe->select_tab(size_t(0));
     }else{
         mainframe->select_tab(size_t(MainFrame::tp3DEditor));
@@ -5177,11 +5202,15 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     mainframe->topbar()->SaveNormalRect();
 #endif
     mainframe->Show(true);
+    if (is_local_agent_helper() && init_params->local_agent_action == "prepare")
+        mainframe->Iconize(true);
 #ifdef __WXOSX__
     // App Store review (Guideline 4): activate on launch so the App menu and
     // Dock icon appear; without this the window stays inactive on fresh installs.
-    Slic3r::activate_app();
-    mainframe->Raise();
+    if (!is_local_agent_helper()) {
+        Slic3r::activate_app();
+        mainframe->Raise();
+    }
 #endif
 #ifdef __WXMSW__
     // Show() invalidates the custom topbar, but startup continues synchronously
@@ -5191,11 +5220,14 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
         RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 #endif
     BOOST_LOG_TRIVIAL(info) << "main frame firstly shown";
-    start_async_material_list_update();
-    OfficialMaterialColors::refresh_async();
+    if (!is_local_agent_helper()) {
+        start_async_material_list_update();
+        OfficialMaterialColors::refresh_async();
+    }
 
     // 启动用户信息文件监听，确保跨实例同步在线模型库登录状态
-    start_user_info_watcher();
+    if (!is_local_agent_helper())
+        start_user_info_watcher();
 
 //#if BBL_HAS_FIRST_PAGE
     //BBS: set tp3DEditor firstly
@@ -5223,7 +5255,8 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     update_mode(mode); // update view mode after fix of the object_list size
 
 #ifdef __APPLE__
-   other_instance_message_handler()->bring_instance_forward();
+   if (!is_local_agent_helper())
+       other_instance_message_handler()->bring_instance_forward();
 #endif //__APPLE__
 
     Bind(EVT_HTTP_ERROR, &GUI_App::on_http_error, this);
@@ -5282,7 +5315,7 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
             
         }
         
-        if (m_post_initialized && app_config->dirty()) {
+        if (!is_local_agent_helper() && m_post_initialized && app_config->dirty()) {
             save_user_default_filaments(app_config);
             app_config->save();
             SyncUserPresets::getInstance().syncConfigToCXCloud();
@@ -5297,6 +5330,12 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     //after init
     parse_args();
 
+    if (is_local_agent_helper()) {
+        // Delay one event turn so that the private Plater's controls and preset
+        // tabs have completed construction before import/export begins.
+        CallAfter([this] { run_local_agent_project_helper(*this); });
+    }
+
     BOOST_LOG_TRIVIAL(info) << "finished the gui app init";
     
     if (m_config_corrupted) {
@@ -5308,8 +5347,9 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     }
 
 #if !AUTO_CONVERT_3MF
-    //  启动同步预设线程
-    SyncUserPresets::getInstance().startup();
+    // The isolated helper must not start background preset-sync/network work.
+    if (!is_local_agent_helper())
+        SyncUserPresets::getInstance().startup();
 #endif
     return true;
 }
@@ -11986,6 +12026,8 @@ void GUI_App::stop_sync_user_preset()
 
 void GUI_App::start_http_server()
 {
+    if (is_local_agent_helper())
+        return;
     if (!m_http_server.is_started())
         m_http_server.start();
 }

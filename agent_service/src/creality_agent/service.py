@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import re
 import time
 from collections import defaultdict
@@ -12,6 +13,8 @@ from .analysis import ModelError, analyze_model
 from .config import Printer, Settings
 from .ingestion import download, extract_models, import_file, sha256, validate_archive
 from .models import JobRequest, ServiceError
+from .notifications import notify
+from .operator import budget_fingerprint
 from .printers import Moonraker
 from .slicer import SliceError, slice_model
 from .store import Store
@@ -31,6 +34,11 @@ class Engine:
         self.tick_tasks: dict[str, asyncio.Task] = {}
         self.awake_process = None
         self.acquire_slots = asyncio.Semaphore(2)
+        self.config_lock = asyncio.Lock()
+        self.chat_tasks: dict[str, asyncio.Task] = {}
+        self.agent_tools = None
+        self.notification_attempts: dict[int, float] = {}
+        self.alert_task: asyncio.Task | None = None
 
     def printer(self, id: str) -> Printer:
         for p in self.settings.printers:
@@ -49,6 +57,7 @@ class Engine:
         result.pop("model_path", None)
         result.pop("gcode_path", None)
         result.pop("source_path", None)
+        result["project_available"] = bool(result.pop("editable_project", None))
         result["models"] = [{k: v for k, v in m.items() if k != "path"} for m in result.get("models", [])]
         return result
 
@@ -56,8 +65,8 @@ class Engine:
         return {"version": "0.1.0", "durable_jobs": True, "api": True, "mcp": True,
                 "formats": ["STL", "OBJ", "3MF", "ZIP"], "camera_pixels_exported": False,
                 "adapters": {"slicer_cli": "installed-help-verified; execution requires profile",
-                             "editable_project_export": "not-yet-qualified",
-                             "creality_gui_ipc": "not-yet-implemented",
+                             "editable_project_export": "isolated native helper implemented; round-trip qualification required",
+                             "creality_gui_ipc": "owner-only local app bridge implemented",
                              "moonraker": "implemented; requires per-printer qualification",
                              "cfs_control": "not-yet-qualified", "bed_recognition": "requires local qualified detector",
                              "failure_recognition": "requires local qualified detector"},
@@ -68,7 +77,9 @@ class Engine:
                  "identity_confirmed": p.identity_confirmed, "protocol_qualified": p.protocol_qualified,
                  "control_qualified": p.control_qualified, "camera_association_confirmed": p.camera_association_confirmed,
                  "vision_qualified": p.vision_qualified, "filament_verified": p.filament_verified,
-                 "auto_start": p.auto_start} for p in self.settings.printers]
+                 "failure_detector_qualified": p.failure_detector_qualified, "material": p.material,
+                 "color": p.color, "remaining_grams": p.remaining_grams,
+                 "cfs_slots": [slot.model_dump() for slot in p.cfs_slots], "auto_start": p.auto_start} for p in self.settings.printers]
 
     def spawn(self, id: str, coro):
         if id in self.tasks and not self.tasks[id].done():
@@ -132,6 +143,8 @@ class Engine:
     async def select(self, id: str, artifact_id: str) -> dict:
         async with self.job_locks[id]:
             job = self.store.get(id)
+            if job.get("ambiguous_start") or job.get("control_reconciliation_required") or job.get("remote_filename"):
+                raise ServiceError("Model selection cannot discard physical job ownership")
             if job["state"] not in {"acquired", "held"} or not any(
                     m["artifact_id"] == artifact_id for m in job.get("models", [])):
                 raise ServiceError("Select a model from this job's imported artifact list")
@@ -150,37 +163,50 @@ class Engine:
             model = next((m for m in job.get("models", []) if m["artifact_id"] == job.get("selected_artifact")), None)
             if not model:
                 raise ServiceError("Select a model before preparation")
+            if sha256(Path(model["path"])) != model["sha256"]:
+                raise ServiceError("Acquired model changed; import it again before preparation")
             printer = self.printer(profile.printer_id)
             request = job["request"]
             if request.get("printer_id") and request["printer_id"] != printer.id:
                 raise ServiceError("Profile does not match the explicitly requested printer")
             if not printer.identity_confirmed or printer.nozzle_mm != profile.nozzle_mm:
                 raise ServiceError("Printer/nozzle configuration does not match the profile")
-            if request.get("settings") or request.get("copies", 1) != 1:
-                raise ServiceError("Explicit setting overrides/copies require the project adapter; none are ignored")
+            if (request.get("settings") or request.get("copies", 1) != 1) and not self.settings.gui_helper_binary:
+                raise ServiceError("Explicit setting overrides/copies require the native project helper; none are ignored")
             if request.get("material") and request["material"].lower() != profile.material.lower():
                 raise ServiceError("Profile would substitute the requested material; owner decision required")
             if request.get("color") and request["color"].lower() != (profile.color or "").lower():
                 raise ServiceError("Profile would substitute the requested color; owner decision required")
-            if Path(model["path"]).suffix.lower() == ".3mf":
+            if Path(model["path"]).suffix.lower() == ".3mf" and not self.settings.gui_helper_binary:
                 raise ServiceError("Imported 3MF settings require native project normalization before slicing")
-            self.store.update(id, "preparing", printer_id=printer.id, profile_id=profile.id, holds=[])
+            profile_fingerprint = hashlib.sha256(profile.model_dump_json().encode()).hexdigest()
+            self.store.update(id, "preparing", printer_id=printer.id, profile_id=profile.id,
+                              profile_fingerprint=profile_fingerprint, holds=[])
             self.spawn(id, self._slice(id, Path(model["path"]), profile))
             return self.store.get(id)
 
     async def _slice(self, id: str, model: Path, profile):
         output = self.home / "jobs" / id / ("slice-" + str(time.time_ns()))
         try:
-            result = await slice_model(Path(self.settings.slicer_binary), model, output,
-                                       [Path(p) for p in profile.settings], [Path(p) for p in profile.filaments])
+            project, verification, helper_warnings = None, {}, []
+            if self.settings.gui_helper_binary:
+                from .project import export_project
+                project, verification, helper_warnings = await export_project(self, id, model, profile,
+                    output.parent / (output.name + "-project"))
+                # Re-open and re-slice the saved project without external profile flags.
+                result = await slice_model(Path(self.settings.slicer_binary), project, output, [], [], cli_mode=True)
+            else:
+                result = await slice_model(Path(self.settings.slicer_binary), model, output,
+                                           [Path(p) for p in profile.settings], [Path(p) for p in profile.filaments])
             files = result["gcode_paths"]
             if len(files) != 1:
                 raise ServiceError("Multiple plates need an explicit assembly/plate plan")
             gcode = Path(files[0])
             estimates = gcode_estimates(gcode)
             self.store.update(id, "prepared", gcode_path=str(gcode), gcode_sha256=sha256(gcode),
-                              estimates=estimates, warnings=result["warnings"], editable_project=None,
-                              holds=["Editable project export and geometry/process preflight require qualification"])
+                              estimates=estimates, warnings=result["warnings"] + helper_warnings,
+                              editable_project=str(project) if project else None, **verification,
+                              holds=["Physical bed-fit/process preflight qualification is required"], preflight_qualified=False)
         except asyncio.CancelledError:
             self.store.update(id, "held", holds=["Preparation interrupted"])
             raise
@@ -204,14 +230,26 @@ class Engine:
     async def eligibility(self, job: dict) -> tuple[Printer, Moonraker, list[str]]:
         p = self.printer(job.get("printer_id") or job["request"].get("printer_id") or "")
         holds = list(job.get("holds", []))
+        if self.store.has_open_question(job["id"]):
+            holds.append("An unanswered owner question holds this job")
         if not all([p.identity_confirmed, p.protocol_qualified, p.control_qualified, p.auto_start,
                     p.vision_qualified, p.camera_association_confirmed, p.filament_verified]):
             holds.append("Printer, control, camera, clearance and filament must be qualified for automatic start")
+        if not p.failure_detector_qualified or not p.failure_detector_url:
+            holds.append("Failure monitoring must be qualified before automatic start")
+        if any(j.get("monitoring_lost") and j["state"] in {"printing", "paused", "held"} for j in self.store.list()):
+            holds.append("Monitoring is unavailable; new starts are held until recovery")
         if p.cfs:
             holds.append("CFS slot/color mapping and load management require a qualified adapter")
         profile = next((r for r in self.settings.profiles if r.id == job.get("profile_id")), None)
         if not profile or not profile.verified or p.nozzle_mm != profile.nozzle_mm:
             holds.append("Verified nozzle/profile match is required")
+        if profile and job.get("profile_fingerprint") != hashlib.sha256(profile.model_dump_json().encode()).hexdigest():
+            holds.append("Profile enrollment changed; prepare the job again")
+        if profile and job.get("profile_sha256"):
+            from .project import profile_digest
+            if profile_digest([Path(f) for f in [*profile.settings, *profile.filaments]]) != job["profile_sha256"]:
+                holds.append("Profile file contents changed; prepare the job again")
         if profile and (p.material != profile.material or (profile.color and p.color != profile.color)):
             holds.append("Loaded material/color does not match the sliced profile")
         policy = self.settings.policy
@@ -224,9 +262,11 @@ class Engine:
             holds.append("Saved editable project and qualified preflight are required")
         if job.get("warnings"):
             holds.append("Slicer warnings require resolution")
-        if estimate.get("hours") is None or estimate.get("grams") is None:
+        if any(not isinstance(estimate.get(k), (int, float)) or not math.isfinite(estimate[k])
+               or estimate[k] <= 0 for k in ("hours", "grams")):
             holds.append("Usable time/filament estimates are required")
-        elif estimate["hours"] > policy.max_hours or estimate["grams"] > policy.max_grams:
+        elif ((estimate["hours"] > policy.max_hours or estimate["grams"] > policy.max_grams)
+              and not self.store.budget_allowed(job["id"], budget_fingerprint(job))):
             holds.append("Estimated time/filament exceeds configured limits; owner decision required")
         if estimate.get("grams") is not None and (p.remaining_grams is None or p.remaining_grams < estimate["grams"]):
             holds.append("Verified remaining filament is insufficient or unknown")
@@ -243,6 +283,9 @@ class Engine:
         result = await qualified_bed_assessment(p, frame, captured, self.home)
         if result.get("verdict") != "clear" or time.time() - captured > policy.frame_max_age_seconds:
             raise ServiceError("Fresh bed clearance is not established")
+        monitored = await failure_assessment(p, frame)
+        if monitored.get("verdict") != "ok":
+            raise ServiceError("Fresh failure-monitoring assessment is unavailable or indicates a problem")
         return p, adapter, []
 
     async def start(self, id: str) -> dict:
@@ -263,6 +306,7 @@ class Engine:
                     await adapter.upload(path, remote)
                     # Upload time can stale camera/state: require another full eligibility check.
                     await self.eligibility(job)
+                    self.store.consume_budget(id)
                     await adapter.control("start", remote)
                     observed = await self.observe(adapter, "printing", remote)
                     return self.store.update(id, "printing", observation=observed)
@@ -296,6 +340,7 @@ class Engine:
             expected = {"pause": {"printing"}, "resume": {"paused"}, "cancel": {"printing", "paused"}}
             if action not in expected or job["state"] not in expected[action]:
                 raise ServiceError("Job is not in a state eligible for that control")
+
             if action == "resume" and not self.store.consume(id, "resume"):
                 raise ServiceError("Resume requires a recorded owner decision")
             adapter = Moonraker(self.printer(job["printer_id"]))
@@ -330,6 +375,26 @@ class Engine:
                 except ServiceError as error:
                     self.store.update(job["id"], "held", holds=[str(error)], ambiguous_start=True)
 
+        self.store.event(None, "recovery", {})
+
+    def monitoring_lost(self, id: str):
+        since = time.monotonic() - self.last_monitor.setdefault(id, time.monotonic())
+        if since > self.settings.policy.monitoring_loss_seconds and not self.store.get(id).get("monitoring_lost"):
+            self.store.update(id, monitoring_lost=True)
+            self.store.event(id, "monitoring_unavailable", {"seconds": round(since)})
+        return since
+
+    async def alerts(self):
+        self.store.collect_alerts()
+        if self.settings.notifications_enabled:
+            now = time.monotonic()
+            for alert in self.store.pending_notifications():
+                if now - self.notification_attempts.get(alert["id"], -60) < 60:
+                    continue
+                self.notification_attempts[alert["id"]] = now
+                if await notify("Creality Print Local Agent", alert["message"], str(alert["id"]), self.home):
+                    self.store.mark_delivered(alert["id"])
+
     async def monitor(self, job: dict):
         id, p = job["id"], self.printer(job["printer_id"])
         try:
@@ -348,24 +413,55 @@ class Engine:
             if status["state"] != "printing":
                 raise ServiceError("Print is no longer in the expected active state")
             capture = await self.camera.capture(p)
-            assessment = await failure_assessment(p, capture[0]) if capture else {"verdict": "unknown"}
+            fresh = capture and time.time() - capture[1] <= self.settings.policy.frame_max_age_seconds
+            assessment = await failure_assessment(p, capture[0]) if fresh else {"verdict": "unknown"}
             if assessment["verdict"] == "failed":
                 self.store.event(id, "failure_detected", {"action": "pause"})
                 await self.control(id, "pause")
                 return
             if assessment["verdict"] == "ok":
                 self.last_monitor[id] = time.monotonic()
+                if self.store.get(id).get("monitoring_lost"):
+                    self.store.update(id, monitoring_lost=False)
+                    self.store.event(id, "monitoring_recovered", {})
             else:
-                since = time.monotonic() - self.last_monitor.setdefault(id, time.monotonic())
+                since = self.monitoring_lost(id)
                 policy = self.settings.policy
-                if since > policy.monitoring_loss_seconds:
-                    self.store.event(id, "monitoring_unavailable", {"seconds": round(since)})
-                    if policy.monitoring_policy_confirmed and policy.pause_on_monitoring_loss:
-                        await self.control(id, "pause")
-                        return
+                if (since > policy.monitoring_loss_seconds and policy.monitoring_policy_confirmed
+                        and policy.pause_on_monitoring_loss):
+                    await self.control(id, "pause")
+                    return
             self.store.update(id, observation=status, monitoring=assessment)
         except ServiceError as error:
+            self.monitoring_lost(id)
             self.store.event(id, "monitoring_error", {"reason": str(error)})
+
+    async def monitor_paused(self, job: dict):
+        # Observe owner controls at the physical printer while retaining tool resume authority.
+        try:
+            p = self.printer(job["printer_id"])
+            status = await self.status(p.id)
+            if status["filename"] != job.get("remote_filename"):
+                raise ServiceError("Paused printer job changed; monitoring ownership lost")
+            if status["state"] in {"printing", "complete", "error"}:
+                observed = {"printing": "printing", "complete": "completed", "error": "failed"}[status["state"]]
+                self.store.update(job["id"], observed, observation=status)
+                return
+            if status["state"] != "paused":
+                raise ServiceError("Paused print state is unavailable")
+            self.store.update(job["id"], observation=status)
+            if not job.get("monitoring_lost"):
+                return
+            capture = await self.camera.capture(p)
+            fresh = capture and time.time() - capture[1] <= self.settings.policy.frame_max_age_seconds
+            assessment = await failure_assessment(p, capture[0]) if fresh else {"verdict": "unknown"}
+            if assessment["verdict"] == "ok":
+                self.last_monitor[job["id"]] = time.monotonic()
+                self.store.update(job["id"], monitoring_lost=False, monitoring=assessment, observation=status)
+                self.store.event(job["id"], "monitoring_recovered", {})
+        except ServiceError as error:
+            self.monitoring_lost(job["id"])
+            self.store.event(job["id"], "monitoring_error", {"reason": str(error)})
 
     async def tick(self, job: dict):
         try:
@@ -373,6 +469,8 @@ class Engine:
                 await self.start(job["id"])
             elif job["state"] == "printing":
                 await self.monitor(job)
+            elif job["state"] == "paused":
+                await self.monitor_paused(job)
             elif job["state"] == "held" and (job.get("ambiguous_start") or job.get("control_reconciliation_required")):
                 status = await self.status(job["printer_id"])
                 if status["filename"] == job.get("remote_filename") and status["state"] in {"printing", "paused"}:
@@ -396,10 +494,14 @@ class Engine:
                 if existing is None or existing.done():
                     self.tick_tasks[job["id"]] = asyncio.create_task(self.tick(job))
             await self.update_awake(jobs)
+            self.store.collect_alerts()
+            if self.alert_task is None or self.alert_task.done():
+                self.alert_task = asyncio.create_task(self.alerts())
+                self.alert_task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
             await asyncio.sleep(3)
 
     async def update_awake(self, jobs: list[dict]):
-        active = any(j["state"] in {"preparing", "starting", "printing", "paused", "pausing", "resuming", "canceling"}
+        active = any(j["state"] in {"acquiring", "preparing", "starting", "printing", "paused", "pausing", "resuming", "canceling"}
                      for j in jobs)
         executable = Path("/usr/bin/caffeinate")
         if active and executable.is_file() and self.awake_process is None:
@@ -413,10 +515,12 @@ class Engine:
     async def close(self):
         if self.loop_task:
             self.loop_task.cancel()
-        for task in [*self.tasks.values(), *self.tick_tasks.values()]:
+        for task in [*self.tasks.values(), *self.tick_tasks.values(), *self.chat_tasks.values(),
+                     *([self.alert_task] if self.alert_task else [])]:
             task.cancel()
-        await asyncio.gather(*self.tasks.values(), *self.tick_tasks.values(),
-                             *([self.loop_task] if self.loop_task else []), return_exceptions=True)
+        await asyncio.gather(*self.tasks.values(), *self.tick_tasks.values(), *self.chat_tasks.values(),
+                             *([self.loop_task] if self.loop_task else []),
+                             *([self.alert_task] if self.alert_task else []), return_exceptions=True)
         if self.awake_process is not None:
             self.awake_process.terminate()
             await self.awake_process.wait()

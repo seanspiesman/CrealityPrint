@@ -230,6 +230,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.hpp
     GUI/GUI_App_Parse.cpp
     GUI/GUI_App.cpp
+    GUI/LocalAgentProjectHelper.cpp
+    GUI/LocalAgentProjectHelper.hpp
     GUI/BaseColorSpectraCache.cpp
     GUI/BaseColorSpectraCache.hpp
     GUI/CxAgentEndpointPolicy.cpp
@@ -868,6 +870,8 @@ if(GUI_SIMPLE)
         GUI/simple/sendWorkflow/CxCloudPrintExecutor.cpp
         GUI/simple/MCPChatPanel.hpp
         GUI/simple/MCPChatPanel.cpp
+        GUI/simple/bridge/LocalAgentBridge.cpp
+        GUI/simple/bridge/LocalAgentBridge.hpp
         GUI/simple/toolcalls/MCPToolCalls.cpp
         GUI/simple/toolcalls/MCPToolCallsRegistration.cpp
         GUI/simple/toolcalls/MCPToolCallsPrinter.cpp

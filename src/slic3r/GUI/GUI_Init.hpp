@@ -20,6 +20,12 @@ struct GUI_InitParams
     DynamicPrintConfig          extra_config;
     std::vector<std::string>    input_files;
 
+    // Private, one-shot local-agent helper mode. These fields are populated only
+    // by GUI_Run's exact command-line switch parser, before single-instance IPC.
+    bool                        local_agent_helper { false };
+    std::string                 local_agent_action;
+    std::string                 local_agent_argument;
+
     //BBS: remove start_as_gcodeviewer logic
 	//bool	                    start_as_gcodeviewer;
 	bool                        input_gcode { false };

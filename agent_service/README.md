@@ -1,14 +1,32 @@
 # Creality Agent Service
 
-A persistent local job service with an authenticated REST API and standard MCP tools. The agent handles orchestration; jobs, inputs and events survive agent disconnection. Printer/camera endpoints and secrets stay in ignored local configuration.
+A persistent local job service with an authenticated REST API and standard MCP tools. The custom app includes a local model conversation workspace; external agents can use the same guarded tools. Jobs, inputs, conversations and alerts survive agent disconnection. Printer/camera endpoints and secrets stay in ignored local configuration.
 
 ## Current capability
 
-Implemented: SQLite jobs/events and request replay; local/direct-public model ingestion; STL/OBJ/3MF metadata; variant selection; CLI slicing worker; authenticated REST, stdio MCP and Streamable HTTP MCP; configured Moonraker upload/control/status adapter; restart reconciliation; concurrent printer monitoring; local detector integration and owner-gated resume. Camera pixels are never included in tools/API results. No raw G-code execution tool is exposed.
+Implemented: SQLite jobs/events and request replay; local/direct-public model ingestion; STL/OBJ/3MF metadata; variant selection; CLI slicing worker; authenticated REST, stdio MCP and Streamable HTTP MCP; configured Moonraker upload/control/status adapter; restart reconciliation; concurrent printer monitoring; local detector integration and owner-gated resume; local model orchestration; owner-only desktop enrollment and decisions; durable alerts and macOS notification delivery. Camera pixels are never included in tools/API results. No raw G-code execution tool is exposed.
 
 Six fleet entries are initialized (one K1 Max, three K1 SE, two Hi), all unqualified. They are not populated from unverified cache rows. `GET /v1/capabilities` reports implemented and unavailable adapters separately. Existing printer firmware is the baseline.
 
-**Physical automation remains held until exact hardware, profile, native project export/preflight, camera freshness, local detectors and control behavior are qualified.** CFS control, repository search adapters, CAD generation and GUI IPC are still implementation work; do not interpret listed tools as live fleet qualification. The primitive local image comparison can identify changes but deliberately cannot claim an empty bed. Use a qualified local detector for clearance/failure decisions.
+**Physical automation remains held until exact hardware, profile, native project export/preflight, camera freshness, local detectors and control behavior are qualified.** CFS control, repository search adapters and CAD generation are still implementation work; do not interpret listed tools as live fleet qualification. The primitive local image comparison can identify changes but deliberately cannot claim an empty bed. Use a qualified local detector for clearance/failure decisions.
+
+
+## Custom app workspace
+
+Build with `CREALITY_LOCAL_AGENT=ON` and bundle identifier `com.seanspiesman.crealityprint.localagent`. The existing chat panel loads bundled `resources/web/local_agent` content and replaces the cloud chat bridge with a finite native owner interface. The page has no network access; native C++ reads `owner.token` and calls loopback operator routes without exposing either service token to JavaScript or the model. Downloaded/model text is rendered as text.
+
+The workspace includes conversations, job history/queue/progress, imported-file candidate selection, holds, operator resume/budget decisions, project inspection, printer/camera/reference/CFS enrollment and local model/profile settings. Polling preserves unsaved form input. Model endpoints may use loopback, private LAN or explicitly owner-configured Tailscale addresses; camera and printer operations remain on the LAN, and camera analysis remains loopback on this Mac.
+
+The native preparation helper uses a separate GUI process and fresh private app data, bypasses single-instance forwarding, and never uses the main app's Plater. macOS preparation and inspection run under a network-denying process sandbox. Preparation accepts one STL/OBJ plus flattened local machine/process/filament profiles and writes a native 3MF with an atomic result manifest. The service independently checks source/profile hashes, mesh geometry and effective settings, then re-opens and re-slices the saved project without external profiles. Unsupported geometry transforms, imported 3MF preparation, overrides, copies and automated repair/orientation/arrangement remain explicit holds. Physical fit/process preflight remains unqualified; no successful export alone enables a print.
+
+Build and package separately without modifying `/Applications/Creality Print.app`:
+
+```sh
+DEPS_ENV_DIR=/absolute/path/to/dependency-prefix agent_service/scripts/build_local_agent_app.sh
+agent_service/scripts/install_local_agent_app.sh '/absolute/path/Creality Print Local Agent.app'
+```
+
+The installer refuses existing destinations and defaults to `~/Applications/Creality Print Local Agent.app`. The custom build uses a separate data version. Configure `gui_helper_binary` and `slicer_binary` in the private service configuration to the separately built executable after native acceptance. See [APP_CONTRACT.md](APP_CONTRACT.md) for the finite owner interface and helper manifests. macOS notifications report accepted delivery requests; permission and actual display require live verification. Durable in-app alert history remains available independently of Notification Center.
 
 ## Run
 
@@ -47,7 +65,7 @@ Stdio configuration (replace absolute paths for your checkout; the adapter calls
 
 A remote agent can instead use the authenticated `/mcp/` endpoint or the REST/OpenAPI contract. Client compatibility must be checked in the actual owner application. A Qwen model server alone is not an MCP host; the orchestration client calls tools.
 
-Tools: `capabilities`, `list_printers`, `get_printer_status`, `list_profiles`, `list_jobs`, `get_job`, `events`, `create_job`, `select_model`, `prepare_job`, `queue_job`, `start_job`, `pause_job`, `cancel_job`, `resume_job`. List tools return an `items` array. Every mutation requires an idempotency key; use a new UUID per intended action and reuse it only when retrying identical input.
+Tools: `capabilities`, `list_printers`, `get_printer_status`, `list_profiles`, `list_jobs`, `get_job`, `events`, `request_owner_input`, `list_questions`, `create_job`, `select_model`, `prepare_job`, `queue_job`, `start_job`, `pause_job`, `cancel_job`, `resume_job`. List tools return an `items` array. Every mutation requires an idempotency key; use a new UUID per intended action and reuse it only when retrying identical input.
 
 Create a job with a supplied URL or allowed local path. Poll until acquisition completes, then inspect measured dimensions, unit assumptions and variants. A multiple-file archive holds for selection. Prepare with an operator-verified profile. Setting overrides and multiple copies hold if they cannot be applied faithfully; they are never silently ignored. Imported 3MF settings require native normalization rather than executing embedded G-code.
 
@@ -71,9 +89,9 @@ The owner grants resume through a local operator action after examining the prob
 .venv/bin/creality-agent approve <job-id> resume
 ```
 
-The MCP/API cannot write owner approvals. The local approval is consumed by one resume attempt. A CLI invocation is an operator authority boundary, not protection against an agent separately granted unrestricted shell/filesystem access.
+Model tools and the agent API credential cannot write owner approvals. The native app uses separate loopback-only operator routes and its private owner credential; owner actions are never advertised as model tools. The local approval is consumed by one resume attempt. A CLI invocation is an operator authority boundary, not protection against an agent separately granted unrestricted shell/filesystem access.
 
-The initial 8-hour/250-gram limits and monitoring-loss pause policy are proposals; automatic start holds until the owner confirms/configures them. Unknown material/color, insufficient filament, CFS mapping, unresolved slicer warnings or missing native project/preflight also hold. No firmware installs, heating, motion or prints occurred during the first implementation/fixture tests.
+The confirmed defaults are 8 hours and 250 grams. Monitoring loss notifies the owner, continues the current print, and holds new starts until monitoring recovers. A validated failure requests a pause; resuming requires a new owner decision. Budget overrides bind the exact artifact hashes and estimates and are consumed by one start attempt. Unknown material/color, insufficient filament, CFS mapping, unresolved slicer warnings or missing native project/preflight also hold. Fixture tests do not qualify physical control or vision. Read-only K1 Max status discovery is recorded separately; no firmware changes or physical operations are part of these checks.
 
 ## macOS startup and tests
 

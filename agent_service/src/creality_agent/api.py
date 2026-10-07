@@ -19,7 +19,13 @@ from starlette.responses import Response
 from .config import StrictModel, initialize
 from .mcp_server import build_mcp
 from .models import JobRequest, PrepareRequest, ServiceError
+from .operator import OperatorAction, dispatch, is_loopback_client, state, typed_error
 from .service import Engine
+
+
+class OwnerQuestion(StrictModel):
+    question: str = Field(min_length=1, max_length=4000)
+    job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class Selection(StrictModel):
@@ -40,6 +46,11 @@ class Guard:
             if not (supplied and (hmac.compare_digest(supplied, self.token.encode()) or
                                  hmac.compare_digest(supplied, self.owner_token.encode()))):
                 return await JSONResponse({"detail": "Valid bearer authentication required"}, 401)(scope, receive, send)
+            scope["creality_role"] = "owner" if hmac.compare_digest(supplied, self.owner_token.encode()) else "agent"
+            if scope["path"].startswith("/v1/operator/"):
+                client = scope.get("client")
+                if scope["creality_role"] != "owner" or not client or not is_loopback_client(client[0]):
+                    return await JSONResponse({"detail": "Local owner access required"}, 403)(scope, receive, send)
             origin = headers.get(b"origin")
             if origin and origin.decode("latin-1") not in self.origins:
                 return await JSONResponse({"detail": "Origin is not authorized"}, 403)(scope, receive, send)
@@ -92,6 +103,8 @@ def create_app(home: Path, run_worker: bool = True) -> FastAPI:
 
     app = FastAPI(title="Creality Agent API", version="0.1.0", lifespan=lifespan)
     app.state.engine = engine
+    import httpx
+    engine.agent_tools = build_mcp(settings.public_base_url, token, transport=httpx.ASGITransport(app=app))
     app.add_middleware(Guard, token=token, owner_token=owner, origins=settings.allowed_origins)
 
     @app.exception_handler(ServiceError)
@@ -101,6 +114,26 @@ def create_app(home: Path, run_worker: bool = True) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, error):
         return JSONResponse({"detail": "Invalid typed request", "fields": [list(e["loc"]) for e in error.errors()]}, 422)
+
+    @app.get("/v1/operator/state")
+    async def operator_state():
+        return state(engine)
+
+    @app.post("/v1/operator/actions")
+    async def operator_action(body: OperatorAction):
+        key = "operator:" + body.idempotency_key
+        fingerprint = hashlib.sha256(body.model_dump_json(exclude={"idempotency_key"}).encode()).hexdigest()
+        lock = request_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            prior = engine.store.remembered(key, fingerprint)
+            if prior is not None:
+                return prior
+            try:
+                result = await dispatch(engine, body.action, body.payload)
+            except (ValueError, TypeError, KeyError) as error:
+                raise typed_error(error) from None
+            engine.store.remember(key, fingerprint, result)
+            return result
 
     @app.get("/health")
     async def health():
@@ -154,6 +187,28 @@ def create_app(home: Path, run_worker: bool = True) -> FastAPI:
                     engine.store.remember(key, fingerprint, result)
             else:
                 result = engine.public_job(await operation())
+                engine.store.remember(key, fingerprint, result)
+            return result
+
+    @app.get("/v1/questions")
+    async def questions():
+        return engine.store.questions()
+
+    @app.post("/v1/questions", status_code=201)
+    async def request_question(request: Request, body: OwnerQuestion):
+        if not body.question.strip():
+            raise ServiceError("A question is required", 422)
+        key = request.headers.get("Idempotency-Key", "")
+        if not key or len(key) > 128:
+            raise ServiceError("Provide an Idempotency-Key of 1–128 characters", 422)
+        fingerprint = hashlib.sha256(json.dumps({"path": request.url.path, "body": body.model_dump()},
+                                                sort_keys=True).encode()).hexdigest()
+        async with request_locks.setdefault(key, asyncio.Lock()):
+            prior = engine.store.remembered(key, fingerprint)
+            if prior is not None:
+                return prior
+            with engine.store.transaction():
+                result = engine.store.request_question(body.question, body.job_id)
                 engine.store.remember(key, fingerprint, result)
             return result
 

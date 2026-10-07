@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import tempfile
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,14 +16,29 @@ class StrictModel(BaseModel):
 class Policy(StrictModel):
     max_hours: float = Field(default=8, gt=0, le=168)
     max_grams: float = Field(default=250, gt=0, le=10000)
-    limits_confirmed: bool = False
+    limits_confirmed: bool = True
     monitoring_loss_seconds: float = Field(default=60, gt=0, le=3600)
-    pause_on_monitoring_loss: bool = True
-    monitoring_policy_confirmed: bool = False
+    pause_on_monitoring_loss: bool = False
+    monitoring_policy_confirmed: bool = True
     max_download_bytes: int = 256 * 1024 * 1024
     max_expanded_bytes: int = 1024 * 1024 * 1024
     max_files: int = 100
     frame_max_age_seconds: float = 10
+
+
+class CFSSlot(StrictModel):
+    slot_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
+    material: str | None = None
+    color: str | None = None
+    remaining_grams: float | None = Field(default=None, ge=0)
+    verified: bool = False
+
+
+class LocalModel(StrictModel):
+    base_url: str = "http://127.0.0.1:8000/v1"
+    model: str = ""
+    api_key: str | None = None
+    max_output_tokens: int = Field(default=12000, ge=256, le=128000)
 
 
 class Printer(StrictModel):
@@ -51,6 +67,7 @@ class Printer(StrictModel):
     failure_detector_url: str | None = None
     failure_detector_qualified: bool = False
     auto_start: bool = False
+    cfs_slots: list[CFSSlot] = Field(default_factory=list)
 
 
 class Profile(StrictModel):
@@ -70,6 +87,9 @@ class Settings(StrictModel):
     allowed_origins: list[str] = Field(default_factory=list)
     public_base_url: str = "http://127.0.0.1:18088"
     slicer_binary: str = "/Applications/Creality Print.app/Contents/MacOS/CrealityPrint"
+    gui_helper_binary: str | None = None
+    notifications_enabled: bool = True
+    local_model: LocalModel = Field(default_factory=LocalModel)
     import_roots: list[str] = Field(default_factory=list)
     policy: Policy = Field(default_factory=Policy)
     printers: list[Printer] = Field(default_factory=list)
@@ -97,3 +117,17 @@ def initialize(home: Path) -> Settings:
             with os.fdopen(fd, "w") as f:
                 f.write(secrets.token_urlsafe(36) + "\n")
     return load_settings(home)
+
+
+def save_settings(home: Path, settings: Settings) -> None:
+    """Replace private configuration atomically; never publish credentials to the UI."""
+    fd, name = tempfile.mkstemp(prefix=".config-", dir=home)
+    try:
+        with os.fdopen(fd, "w") as file:
+            os.fchmod(file.fileno(), 0o600)
+            file.write(settings.model_dump_json(indent=2) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(name, home / "config.json")
+    finally:
+        Path(name).unlink(missing_ok=True)

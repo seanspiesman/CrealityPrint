@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -136,7 +137,7 @@ def test_api_payload_excludes_image_and_freeform_detector_data(tmp_path, monkeyp
         return {"state": "printing", "filename": "job.gcode"}
 
     async def capture(_printer):
-        return b"synthetic-frame", 100.0
+        return b"synthetic-frame", time.time()
 
     monkeypatch.setattr(engine, "status", status)
     monkeypatch.setattr(engine.camera, "capture", capture)
@@ -150,6 +151,19 @@ def test_api_payload_excludes_image_and_freeform_detector_data(tmp_path, monkeyp
     encoded = json.dumps({"events": event_payload, "job": job_payload})
     assert "PRIVATE_FREEFORM_MARKER" not in encoded
     assert "PRIVATE_PIXEL_MARKER" not in encoded
+    assert any(event["kind"] == "failure_detected" for event in event_payload)
     assert all(event["data"] == {"action": "pause"} for event in event_payload if event["kind"] == "failure_detected")
     assert job_payload["state"] == "printing"
     asyncio.run(engine.close())
+
+
+@pytest.mark.asyncio
+async def test_nonfinite_camera_capture_timestamp_rejected(monkeypatch):
+    import io
+    image = io.BytesIO()
+    Image.new("RGB", (4, 4), color=(20, 30, 40)).save(image, "JPEG")
+    loopback_client(monkeypatch, lambda _: httpx.Response(200, content=image.getvalue(), headers={"X-Captured-At": "nan"}))
+    monkeypatch.setattr(vision, "pin_lan", lambda _: ("http://192.168.4.63/snapshot", "192.168.4.63:80", "192.168.4.63"))
+    printer = Printer(id="p", name="Printer", model="test", camera_url="http://192.168.4.63/snapshot",
+                      camera_association_confirmed=True, frame_time_header="X-Captured-At")
+    assert await vision.Camera().capture(printer) is None

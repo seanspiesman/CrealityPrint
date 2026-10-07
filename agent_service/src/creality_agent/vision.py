@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import math
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -66,12 +67,14 @@ class Camera:
                 if not stamp and not sequence:
                     return None
                 captured = float(stamp) if stamp else time.time()
-                if captured > time.time() + 2 or captured < time.time() - 10:
+                if not math.isfinite(captured) or captured > time.time() + 2 or captured < time.time() - 10:
                     return None
                 if sequence:
-                    if self.sequences.get(printer.id) == sequence:
-                        return None
+                    previous = self.sequences.get(printer.id)
                     self.sequences[printer.id] = sequence
+                    if previous == sequence or (previous is None and not stamp):
+                        # A first sequence alone does not prove source freshness; observe advancement.
+                        return None
                 with Image.open(io.BytesIO(raw)) as image:
                     if image.width * image.height > 12_000_000:
                         return None

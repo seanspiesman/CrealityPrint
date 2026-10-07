@@ -21,6 +21,7 @@
 #include "bridge/CxAgentClientBridge.hpp"
 #include "bridge/SAgentMqttBridge.hpp"
 #include "bridge/SlicerBridge.hpp"
+#include "bridge/LocalAgentBridge.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -202,6 +203,14 @@ private:
     std::string m_cxagent_client_id;
     std::string m_cxagent_session_id;
     wxString    m_chat_page_origin;  // Initial page origin used to detect external links
+#ifdef CREALITY_LOCAL_AGENT
+    bool        m_local_agent_mode = true;
+#else
+    bool        m_local_agent_mode = false;
+#endif
+    bool        m_local_agent_helper_mode = false;
+    wxString    m_local_agent_page_url;
+    std::unique_ptr<Bridge::LocalAgentBridge> m_local_agent_bridge;
     std::unique_ptr<AISendWorkflowService> m_ai_send_workflow;
     std::unique_ptr<Bridge::CxAgentClientBridge> m_cxagent_bridge;
     std::unique_ptr<Bridge::SAgentMqttBridge> m_sagent_mqtt_bridge;

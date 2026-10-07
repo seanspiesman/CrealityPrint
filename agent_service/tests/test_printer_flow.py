@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -197,7 +198,7 @@ async def test_monitor_failure_pauses_once_and_resume_requires_owner_decision(tm
         return {"state": "printing", "filename": remote}
 
     async def capture(_printer):
-        return b"frame", 1.0
+        return b"frame", time.time()
 
     async def failed_assessment(_printer, _frame):
         return {"verdict": "failed"}

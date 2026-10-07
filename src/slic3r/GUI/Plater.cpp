@@ -19299,8 +19299,10 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files,
     // BBS: wish to reset all plates stats item selected state when load a new file
     p->preview->get_canvas3d()->reset_select_plate_toolbar_selection();
 
-    // [NEW] Reset geometry modification marker when loading new file
-    try {
+    // The one-shot local-agent Plater runs in a private process and must not
+    // submit model paths or fingerprints to the normal analytics pipeline.
+    if (!wxGetApp().is_local_agent_helper()) {
+      try {
         AnalyticsDataUploadManager::ProjectModificationTracker::getInstance().reset();
         // Sync-reset AnalyticsProjectInfo (file_format/url/model_id etc.), prevent stale 3MF async callback
         AnalyticsDataUploadManager::getInstance().clear_analytics_project_info();
@@ -19316,12 +19318,13 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files,
             AnalyticsDataUploadManager::getInstance().mark_analytics_project_info(
                 input_files[0].string(), "", "", ext, input_files[0].filename().string());
         }
-    } catch (const std::exception& e) {
+      } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(warning) << "[Modification] Failed to reset modification tracker: " << e.what();
+      }
     }
 
     // 【新增】异步计算3MF文件指纹（不阻塞UI）
-    for (const auto& file_path : input_files) {
+    if (!wxGetApp().is_local_agent_helper()) for (const auto& file_path : input_files) {
         if (file_path.extension() == ".3mf") {
             try {
                 // 异步计算并设置 model_id（不阻塞主线程）
@@ -20157,6 +20160,8 @@ int Plater::get_3mf_file_count(std::vector<fs::path> paths)
 }
 
 void Plater::import_model_event(const std::vector<fs::path>& paths) {
+    if (wxGetApp().is_local_agent_helper() || paths.empty())
+        return;
     bool is_single_3mf = (paths.size() == 1 && boost::algorithm::iends_with(paths[0].string(), ".3mf"));
 
     if (!is_single_3mf) {

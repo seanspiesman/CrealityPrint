@@ -246,7 +246,8 @@ MainFrame::MainFrame()
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
 #endif
-    wxGetApp().start_http_server();
+    if (!wxGetApp().is_local_agent_helper())
+        wxGetApp().start_http_server();
     //if (!wxGetApp().app_config->has("user_mode")) { 
     //    wxGetApp().app_config->set("user_mode", "simple");
     //    wxGetApp().app_config->set_bool("developer_mode", false);

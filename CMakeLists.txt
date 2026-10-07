@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 3.13)
 # Data compatibility epoch; independent of the application release version.
 set(CREALITYPRINT_DATA_VERSION "7.3" CACHE STRING "User data directory compatibility version")
 
+option(CREALITY_LOCAL_AGENT "Use local guarded AI printing workspace" OFF)
+if(CREALITY_LOCAL_AGENT)
+    add_compile_definitions(CREALITY_LOCAL_AGENT=1)
+    set(CREALITYPRINT_DATA_VERSION "local-agent-7.3" CACHE STRING "Isolated local agent application data" FORCE)
+endif()
+
 option(CREALITYPRINT_APP_STORE "Build the macOS App Store variant" OFF)
 
 if (APPLE)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
 import stat
 import time
 from pathlib import Path
@@ -47,7 +48,24 @@ def _warning_summary(output: str) -> list[str]:
     return [f"Slicer reported {count} warning(s)."] if count else []
 
 
-async def _stop_process(process: asyncio.subprocess.Process) -> None:
+async def _stop_process(process: asyncio.subprocess.Process, *, process_group: bool = False) -> None:
+    if process_group:
+        # The caller starts a private session; terminate wrappers and their helper descendants.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            pass
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+        return
     if process.returncode is not None:
         return
     process.terminate()
@@ -65,6 +83,7 @@ async def slice_model(
     settings: list[Path],
     filaments: list[Path],
     timeout_seconds: float = 300,
+    *, cli_mode: bool = False,
 ) -> dict:
     """Slice one STL, OBJ, or 3MF with verified inputs and isolated outputs."""
     started = time.monotonic()
@@ -94,7 +113,7 @@ async def slice_model(
     except OSError:
         raise SliceError("Output directory is unavailable") from None
 
-    argv: list[str] = [str(binary), "--slice", "0", "--outputdir", str(output_dir)]
+    argv: list[str] = [str(binary), *(["--cli"] if cli_mode else []), "--slice", "0", "--outputdir", str(output_dir)]
     if setting_paths:
         argv.extend(("--load-settings", ";".join(map(str, setting_paths))))
     if filament_paths:

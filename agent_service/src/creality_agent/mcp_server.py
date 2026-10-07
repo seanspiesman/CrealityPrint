@@ -111,6 +111,15 @@ def build_mcp(base_url: str, token: str, transport: httpx.AsyncBaseTransport | N
     async def list_profiles() -> dict[str, Any]:
         return await call("GET", "/v1/profiles")
 
+    @server.tool(description="Ask the owner a consequential question and persist it in the app. Answering never grants resume or budget approval. Requires an idempotency key.")
+    async def request_owner_input(question: str, idempotency_key: str, job_id: str | None = None) -> dict[str, Any]:
+        return await call("POST", "/v1/questions", payload={"question": question, "job_id": job_id},
+                          idempotency_key=idempotency_key)
+
+    @server.tool(description="Read owner questions and answers. Do not invent answers or continue dependent work before an answer exists.")
+    async def list_questions() -> dict[str, Any]:
+        return await call("GET", "/v1/questions")
+
     @server.tool(description="List jobs.")
     async def list_jobs() -> dict[str, Any]:
         return await call("GET", "/v1/jobs")
